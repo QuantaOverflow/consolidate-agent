@@ -1,0 +1,29 @@
+# Environment and local secrets
+.env
+.env.*.local
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.dist/
+dist/
+build/
+*.egg-info/
+
+# Local outputs and generated artifacts
+outputs/
+outputs-*/
+
+# OS/editor noise
+.DS_Store
