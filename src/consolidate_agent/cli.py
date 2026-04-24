@@ -12,9 +12,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Offline Codex pitfall extraction pipeline")
     parser.add_argument("--input-dir", help="Session input directory")
     parser.add_argument("--output-dir", help="Output directory")
-    parser.add_argument("--cursor-path", help="Cursor file path")
+    parser.add_argument("--cursor-path", help="Legacy cursor file path")
+    parser.add_argument("--processed-index-path", help="Processed index file path")
     parser.add_argument("--session-index", help="Session index path")
     parser.add_argument("--sample-limit", type=int, default=None, help="Limit the number of sessions")
+    parser.add_argument("--max-chunk-chars", type=int, default=None, help="Maximum approximate chars per extraction chunk")
+    parser.add_argument("--overlap-messages", type=int, default=None, help="Number of messages to overlap between chunks")
     return parser
 
 
@@ -24,19 +27,26 @@ def main() -> None:
     input_dir = Path(args.input_dir or settings.sessions_dir_path).expanduser()
     output_dir = Path(args.output_dir or settings.output_dir_path).expanduser()
     cursor_path = Path(args.cursor_path or settings.cursor_path).expanduser()
+    processed_index_path = Path(args.processed_index_path or settings.processed_index_path).expanduser()
     session_index_path = Path(args.session_index or settings.session_index_path).expanduser()
 
     state = PipelineState(
         input_dir=str(input_dir),
         output_dir=str(output_dir),
         cursor_path=str(cursor_path),
+        processed_index_path=str(processed_index_path),
         session_index_path=str(session_index_path),
         sample_limit=args.sample_limit,
+        max_chunk_chars=args.max_chunk_chars or settings.consolidate_max_chunk_chars,
+        overlap_messages=args.overlap_messages if args.overlap_messages is not None else settings.consolidate_overlap_messages,
     )
     graph = ConsolidationGraph(settings)
     result = graph.invoke(state)
     print(f"Discovered sessions: {result.stats.discovered_sessions}")
+    print(f"Skipped sessions: {result.stats.skipped_sessions}")
     print(f"Processed sessions: {result.stats.processed_sessions}")
+    print(f"Failed sessions: {result.stats.failed_sessions}")
+    print(f"Chunks: {result.stats.chunk_count}")
     print(f"Candidates: {result.stats.candidate_count}")
     print(f"Accepted: {result.stats.accepted_count}")
     print(f"Rejected: {result.stats.rejected_count}")

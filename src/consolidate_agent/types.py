@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal
-
 from pydantic import BaseModel, Field
 
 
@@ -37,6 +35,13 @@ class AdmissionStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class ProcessedStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    PROCESSED = "processed"
+    FAILED = "failed"
+
+
 class TranscriptMessage(BaseModel):
     ref: str
     timestamp: datetime
@@ -55,6 +60,15 @@ class Transcript(BaseModel):
     messages: list[TranscriptMessage] = Field(default_factory=list)
 
 
+class TranscriptChunk(BaseModel):
+    session_id: str
+    chunk_id: str
+    chunk_index: int = Field(ge=0)
+    total_chunks: int = Field(ge=1)
+    messages: list[TranscriptMessage] = Field(default_factory=list)
+    char_count: int = Field(ge=0)
+
+
 class PitfallCandidate(BaseModel):
     candidate_id: str
     session_id: str
@@ -68,6 +82,7 @@ class PitfallCandidate(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
     admission_status: AdmissionStatus = AdmissionStatus.PENDING
+    chunk_id: str | None = None
 
 
 class PitfallEvidence(BaseModel):
@@ -96,9 +111,27 @@ class CursorState(BaseModel):
     updated_at: datetime | None = None
 
 
+class ProcessedSessionState(BaseModel):
+    session_id: str
+    path: str
+    normalized_hash: str
+    status: ProcessedStatus = ProcessedStatus.PENDING
+    chunk_count: int = 0
+    processed_at: datetime | None = None
+    error: str | None = None
+
+
+class ProcessedIndex(BaseModel):
+    sessions: dict[str, ProcessedSessionState] = Field(default_factory=dict)
+    updated_at: datetime | None = None
+
+
 class RunStats(BaseModel):
     discovered_sessions: int = 0
+    skipped_sessions: int = 0
     processed_sessions: int = 0
+    failed_sessions: int = 0
+    chunk_count: int = 0
     candidate_count: int = 0
     accepted_count: int = 0
     rejected_count: int = 0
@@ -113,13 +146,22 @@ class PipelineState(BaseModel):
     input_dir: str
     output_dir: str
     cursor_path: str
+    processed_index_path: str
     session_index_path: str | None = None
     sample_limit: int | None = None
+    max_chunk_chars: int = 30000
+    overlap_messages: int = 5
     sessions: list[str] = Field(default_factory=list)
+    transcript_paths: dict[str, str] = Field(default_factory=dict)
+    transcript_hashes: dict[str, str] = Field(default_factory=dict)
     transcripts: list[Transcript] = Field(default_factory=list)
+    chunks: list[TranscriptChunk] = Field(default_factory=list)
     candidates: list[PitfallCandidate] = Field(default_factory=list)
     accepted_records: list[PitfallRecord] = Field(default_factory=list)
     rejected_candidates: list[PitfallCandidate] = Field(default_factory=list)
+    successful_session_ids: list[str] = Field(default_factory=list)
+    failed_session_ids: list[str] = Field(default_factory=list)
+    processed_index: ProcessedIndex = Field(default_factory=ProcessedIndex)
     stats: RunStats = Field(default_factory=RunStats)
 
 

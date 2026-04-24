@@ -11,11 +11,11 @@ from pydantic import BaseModel, Field
 from consolidate_agent.config import Settings
 from consolidate_agent.types import (
     AdmissionStatus,
-    ExtractionOutput,
     PitfallCandidate,
     PitfallCategory,
     PitfallScope,
     Transcript,
+    TranscriptChunk,
 )
 
 
@@ -46,10 +46,11 @@ class PitfallExtractor:
                     "system",
                     dedent(
                         """
-                        You extract reusable pitfall candidates from normalized Codex transcripts.
+                        You extract reusable pitfall candidates from a bounded chunk of a normalized Codex transcript.
                         Only extract pitfalls in these categories: execution_strategy, tooling_environment.
                         Do not summarize the transcript.
-                        Only return reusable pitfalls supported by evidence refs.
+                        Only return reusable pitfalls supported by evidence refs from this chunk.
+                        Evidence refs must use the original message ref values exactly as provided.
                         Every pitfall must include trigger, failure_mode, impact, preventive_rule, scope, evidence_refs, confidence.
                         Scope must be one of: global, project_specific, session_specific.
                         If unsure, return fewer pitfalls.
@@ -59,7 +60,7 @@ class PitfallExtractor:
                 ),
                 (
                     "user",
-                    "Transcript JSON:\n{transcript_json}\n\nReturn pitfall candidates for this single session.",
+                    "Transcript chunk JSON:\n{chunk_json}\n\nReturn pitfall candidates for this bounded chunk only.",
                 ),
             ]
         )
@@ -77,19 +78,30 @@ class PitfallExtractor:
         )
 
     def extract(self, transcript: Transcript) -> list[PitfallCandidate]:
+        chunk = TranscriptChunk(
+            session_id=transcript.session_id,
+            chunk_id=f"{transcript.session_id}:chunk:0000",
+            chunk_index=0,
+            total_chunks=1,
+            messages=transcript.messages,
+            char_count=len(json.dumps(transcript.model_dump(mode="json"), ensure_ascii=False)),
+        )
+        return self.extract_chunk(chunk)
+
+    def extract_chunk(self, chunk: TranscriptChunk) -> list[PitfallCandidate]:
         prompt_value = self.prompt.invoke(
             {
-                "transcript_json": json.dumps(transcript.model_dump(mode="json"), ensure_ascii=False, indent=2)
+                "chunk_json": json.dumps(chunk.model_dump(mode="json"), ensure_ascii=False, indent=2)
             }
         )
         result = self.structured_model.invoke(prompt_value)
         candidates: list[PitfallCandidate] = []
         for item in result.pitfalls:
-            candidate_id = self._candidate_id(transcript.session_id, item.title, item.category)
+            candidate_id = self._candidate_id(chunk.session_id, chunk.chunk_id, item.title, item.category)
             candidates.append(
                 PitfallCandidate(
                     candidate_id=candidate_id,
-                    session_id=transcript.session_id,
+                    session_id=chunk.session_id,
                     title=item.title,
                     category=item.category,
                     trigger=item.trigger,
@@ -100,11 +112,12 @@ class PitfallExtractor:
                     evidence_refs=item.evidence_refs,
                     confidence=item.confidence,
                     admission_status=AdmissionStatus.PENDING,
+                    chunk_id=chunk.chunk_id,
                 )
             )
         return candidates
 
-    def _candidate_id(self, session_id: str, title: str, category: PitfallCategory) -> str:
-        raw = f"{session_id}:{category.value}:{title}".encode("utf-8")
+    def _candidate_id(self, session_id: str, chunk_id: str, title: str, category: PitfallCategory) -> str:
+        raw = f"{session_id}:{chunk_id}:{category.value}:{title}".encode("utf-8")
         digest = hashlib.sha1(raw).hexdigest()[:12]
         return f"candidate_{digest}"
