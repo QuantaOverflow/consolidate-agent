@@ -60,9 +60,10 @@ class PitfallExtractor:
                 ),
                 (
                     "user",
-                    "Transcript chunk JSON:\n{chunk_json}\n\nReturn pitfall candidates for this bounded chunk only.",
+                    "Transcript chunk JSON:\n{{ chunk_json }}\n\nReturn pitfall candidates for this bounded chunk only.",
                 ),
-            ]
+            ],
+            template_format="jinja2",
         )
 
     def _build_model(self) -> ChatQwen:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from consolidate_agent.chunk import normalized_transcript_hash, split_transcript
+from consolidate_agent.extraction.chunk import normalized_transcript_hash, split_transcript
 from consolidate_agent.types import MessageKind, MessageRole, Transcript, TranscriptMessage, utc_now
 
 

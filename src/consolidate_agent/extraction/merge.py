@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import re
 
-from consolidate_agent.types import PitfallCandidate
+from consolidate_agent.types import PitfallCandidate, normalize_text
 
 
 def merge_session_candidates(candidates: list[PitfallCandidate]) -> list[PitfallCandidate]:
@@ -24,13 +23,9 @@ def merge_session_candidates(candidates: list[PitfallCandidate]) -> list[Pitfall
 
 
 def _dedupe_key(candidate: PitfallCandidate) -> str:
-    title = _normalize_string(candidate.title)
-    rule = _normalize_string(candidate.preventive_rule)
+    title = normalize_text(candidate.title)
+    rule = normalize_text(candidate.preventive_rule)
     return f"{candidate.category.value}|{title}|{rule}"
-
-
-def _normalize_string(value: str) -> str:
-    return re.sub(r"\s+", " ", value.strip().lower())
 
 
 def _candidate_id(session_id: str, key: str) -> str:

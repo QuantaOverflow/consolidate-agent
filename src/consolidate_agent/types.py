@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from pydantic import BaseModel, Field
@@ -40,6 +41,40 @@ class ProcessedStatus(str, Enum):
     PROCESSING = "processing"
     PROCESSED = "processed"
     FAILED = "failed"
+
+
+class KnowledgeRelation(str, Enum):
+    DUPLICATE = "duplicate"
+    OVERLAP = "overlap"
+    PARENT_CHILD = "parent_child"
+    DISTINCT = "distinct"
+
+
+class CanonicalKnowledgeStatus(str, Enum):
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    REJECTED = "rejected"
+
+
+class SourceConsolidationStatus(str, Enum):
+    PENDING = "pending"
+    CLASSIFIED = "classified"
+    LINKED = "linked"
+    FAILED = "failed"
+
+
+class MechanismTagStatus(str, Enum):
+    ACTIVE = "active"
+    PROPOSED = "proposed"
+    REJECTED = "rejected"
+    MERGED = "merged"
+
+
+class TagProposalDecision(str, Enum):
+    PROPOSED = "proposed"
+    ACCEPTED = "accepted"
+    MERGED = "merged"
+    REJECTED = "rejected"
 
 
 class TranscriptMessage(BaseModel):
@@ -101,9 +136,82 @@ class PitfallRecord(BaseModel):
     scope: PitfallScope
     evidence: PitfallEvidence
     confidence: float = Field(ge=0.0, le=1.0)
-    tags: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+
+class CanonicalKnowledge(BaseModel):
+    canonical_id: str
+    title: str
+    category: PitfallCategory
+    summary: str
+    preventive_rule: str
+    scope: PitfallScope
+    status: CanonicalKnowledgeStatus = CanonicalKnowledgeStatus.ACTIVE
+    source_record_ids: list[str] = Field(default_factory=list)
+    support_count: int = Field(default=0, ge=0)
+    created_at: datetime
+    updated_at: datetime
+
+
+class KnowledgeInstanceLink(BaseModel):
+    source_record_id: str
+    canonical_id: str
+    relation: KnowledgeRelation
+    linked_at: datetime
+
+
+class MechanismTag(BaseModel):
+    tag_id: str
+    name: str
+    definition: str
+    status: MechanismTagStatus = MechanismTagStatus.ACTIVE
+    positive_examples: list[str] = Field(default_factory=list)
+    negative_examples: list[str] = Field(default_factory=list)
+    merged_into_tag_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RuleTagAssignment(BaseModel):
+    canonical_id: str
+    tag_id: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    assignment_reason: str
+    linked_at: datetime
+
+
+class TagProposal(BaseModel):
+    proposal_id: str
+    name: str
+    definition: str
+    supporting_canonical_ids: list[str] = Field(default_factory=list)
+    nearest_existing_tag_ids: list[str] = Field(default_factory=list)
+    difference_from_existing: str
+    decision: TagProposalDecision = TagProposalDecision.PROPOSED
+    target_tag_id: str | None = None
+    decision_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConsolidationStats(BaseModel):
+    run_id: str | None = None
+    source_records_seen: int = 0
+    source_records_linked: int = 0
+    canonical_created: int = 0
+    canonical_reused: int = 0
+    classification_failures: int = 0
+    tags_created: int = 0
+    tag_proposals_created: int = 0
+    rules_tagged: int = 0
+    rules_classified: int = 0
+    rules_covered_by_existing: int = 0
+    rules_skipped_no_tag: int = 0
+    taxonomy_governance_failures: int = 0
+    rule_classification_failures: int = 0
+    agent_invocations: int = 0
+    agent_failures: int = 0
 
 
 class CursorState(BaseModel):
@@ -135,7 +243,6 @@ class RunStats(BaseModel):
     candidate_count: int = 0
     accepted_count: int = 0
     rejected_count: int = 0
-    library_size: int = 0
 
 
 class ExtractionOutput(BaseModel):
@@ -147,6 +254,7 @@ class PipelineState(BaseModel):
     output_dir: str
     cursor_path: str
     processed_index_path: str
+    knowledge_db_path: str = ""
     session_index_path: str | None = None
     sample_limit: int | None = None
     max_chunk_chars: int = 30000
@@ -168,5 +276,5 @@ class PipelineState(BaseModel):
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
-
-GraphState = dict[str, object]
+def normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().lower())

@@ -17,6 +17,10 @@ LOW_SIGNAL_ASSISTANT_PATTERNS = (
     "我先核对",
 )
 
+TEXT_COMPRESS_LIMIT = 1200
+TOOL_OUTPUT_FALLBACK_LINES = 8
+EVENT_COMMAND_MAX_PARTS = 6
+
 INDEX_ENTRY_ADAPTER = TypeAdapter(dict[str, Any])
 
 
@@ -49,15 +53,18 @@ class SessionNormalizer:
     def __init__(self, index: SessionIndex | None = None):
         self.index = index or SessionIndex({})
 
-    def normalize_file(self, path: Path) -> Transcript:
+    def normalize_file(self, path: Path) -> Transcript | None:
         raw_events = self._read_jsonl(path)
         meta = next((event for event in raw_events if event.get("type") == "session_meta"), {})
         payload = meta.get("payload", {})
+        source = payload.get("source") or payload.get("originator")
+        if isinstance(source, dict):
+            return None
         session_id = str(payload.get("id") or path.stem)
         transcript = Transcript(
             session_id=session_id,
             thread_name=self.index.get_thread_name(session_id),
-            source=payload.get("source") or payload.get("originator"),
+            source=source,
             cwd=payload.get("cwd"),
             started_at=payload.get("timestamp"),
             messages=[],
@@ -167,7 +174,7 @@ class SessionNormalizer:
             return True
         return False
 
-    def _compress_text(self, text: str, limit: int = 1200) -> str:
+    def _compress_text(self, text: str, limit: int = TEXT_COMPRESS_LIMIT) -> str:
         compact = re.sub(r"\s+", " ", text).strip()
         if len(compact) <= limit:
             return compact
@@ -184,10 +191,7 @@ class SessionNormalizer:
             if any(token in candidate for token in ("error", "exception", "traceback", "command not found", "exit code", "permission denied", "operation not permitted", "timed out", "no such file")):
                 high_signal.append(line)
         if not high_signal:
-            if "process exited with code" in lower or "output:" in lower:
-                high_signal = lines[:6]
-            else:
-                return ""
+            high_signal = lines[:TOOL_OUTPUT_FALLBACK_LINES]
         return self._compress_text(" | ".join(high_signal), limit=600)
 
     def _is_high_signal_event(self, payload: dict[str, Any]) -> bool:
@@ -203,7 +207,7 @@ class SessionNormalizer:
         parts: list[str] = [payload_type]
         command = payload.get("command")
         if isinstance(command, list):
-            parts.append("command=" + " ".join(str(piece) for piece in command[:6]))
+            parts.append("command=" + " ".join(str(piece) for piece in command[:EVENT_COMMAND_MAX_PARTS]))
         exit_code = payload.get("exit_code")
         if exit_code not in (None, 0):
             parts.append(f"exit_code={exit_code}")

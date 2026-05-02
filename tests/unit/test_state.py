@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from consolidate_agent.state import read_processed_index, write_processed_index
+from consolidate_agent.extraction.pipeline import read_processed_index, write_processed_index
 from consolidate_agent.types import ProcessedIndex, ProcessedSessionState, ProcessedStatus
 
 

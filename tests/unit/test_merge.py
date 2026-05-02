@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from consolidate_agent.merge import merge_session_candidates
+from consolidate_agent.extraction.merge import merge_session_candidates
 from consolidate_agent.types import PitfallCandidate, PitfallCategory, PitfallScope
 
 

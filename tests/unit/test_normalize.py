@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from consolidate_agent.normalize import SessionIndex, SessionNormalizer
+from consolidate_agent.extraction.normalize import SessionIndex, SessionNormalizer
 
 
 def write_session(path: Path) -> None:
@@ -91,3 +91,82 @@ def test_normalizer_keeps_high_signal_items(tmp_path: Path) -> None:
     assert transcript.messages[1].text.startswith("问题已经明确了")
     assert "command not found: python" in transcript.messages[3].text
     assert transcript.messages[-1].kind.value == "event"
+
+
+def test_normalizer_handles_empty_file(tmp_path: Path) -> None:
+    session_path = tmp_path / "empty.jsonl"
+    session_path.write_text("", encoding="utf-8")
+
+    transcript = SessionNormalizer().normalize_file(session_path)
+
+    assert transcript is not None
+    assert transcript.session_id == "empty"
+    assert transcript.messages == []
+
+
+def test_normalizer_skips_system_only_session(tmp_path: Path) -> None:
+    session_path = tmp_path / "system-only.jsonl"
+    events = [
+        {
+            "timestamp": "2026-04-14T09:15:26.524Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "session-system-only",
+                "timestamp": "2026-04-14T09:15:26.524Z",
+                "cwd": "/tmp/project",
+                "source": "cli",
+            },
+        },
+        {
+            "timestamp": "2026-04-14T09:15:26.525Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "system instruction"}],
+            },
+        },
+    ]
+    with session_path.open("w", encoding="utf-8") as handle:
+        for event in events:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    transcript = SessionNormalizer().normalize_file(session_path)
+
+    assert transcript is not None
+    assert transcript.session_id == "session-system-only"
+    assert transcript.messages == []
+    assert transcript.source == "cli"
+
+
+def test_normalizer_tolerates_missing_messages_field(tmp_path: Path) -> None:
+    session_path = tmp_path / "missing-messages.jsonl"
+    events = [
+        {
+            "timestamp": "2026-04-14T09:15:26.524Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "session-missing-messages",
+                "timestamp": "2026-04-14T09:15:26.524Z",
+                "cwd": "/tmp/project",
+                "source": "cli",
+            },
+        },
+        {
+            "timestamp": "2026-04-14T09:15:27.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+            },
+        },
+    ]
+    with session_path.open("w", encoding="utf-8") as handle:
+        for event in events:
+            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    transcript = SessionNormalizer().normalize_file(session_path)
+
+    assert transcript is not None
+    assert transcript.session_id == "session-missing-messages"
+    assert transcript.messages == [], "message with missing content field must be silently dropped"

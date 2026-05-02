@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 
 from consolidate_agent.config import Settings
-from consolidate_agent.graph import ConsolidationGraph
+from consolidate_agent.extraction.pipeline import ConsolidationGraph
+from consolidate_agent.knowledge.store import KnowledgeStore
 from consolidate_agent.types import PitfallCandidate, PitfallCategory, PitfallScope, PipelineState, ProcessedStatus
 
 
@@ -72,6 +73,7 @@ def make_state(tmp_path: Path, input_dir: Path) -> PipelineState:
         output_dir=str(output_dir),
         cursor_path=str(output_dir / "cursor.json"),
         processed_index_path=str(output_dir / "processed-index.json"),
+        knowledge_db_path=str(output_dir / "knowledge.db"),
         session_index_path=str(tmp_path / "missing-index.jsonl"),
         max_chunk_chars=10000,
         overlap_messages=1,
@@ -82,7 +84,7 @@ def test_graph_writes_processed_index_and_skips_unchanged_sessions(tmp_path: Pat
     input_dir = tmp_path / "sessions"
     input_dir.mkdir()
     write_session(input_dir / "session.jsonl")
-    monkeypatch.setattr("consolidate_agent.graph.PitfallExtractor", FakeExtractor)
+    monkeypatch.setattr("consolidate_agent.extraction.pipeline.PitfallExtractor", FakeExtractor)
     FakeExtractor.calls = 0
 
     settings = Settings(DASHSCOPE_API_KEY="dummy")
@@ -90,17 +92,29 @@ def test_graph_writes_processed_index_and_skips_unchanged_sessions(tmp_path: Pat
     second = ConsolidationGraph(settings).invoke(make_state(tmp_path, input_dir))
 
     assert first.stats.processed_sessions == 1
+    assert first.stats.accepted_count == 1
     assert first.processed_index.sessions["session-1"].status == ProcessedStatus.PROCESSED
     assert second.stats.skipped_sessions == 1
     assert second.stats.processed_sessions == 0
+    assert second.stats.accepted_count == 0
     assert FakeExtractor.calls == 1
+    assert not (tmp_path / "outputs" / "pitfalls.json").exists()
+    assert not (tmp_path / "outputs" / "pitfalls.md").exists()
+
+    store = KnowledgeStore(tmp_path / "outputs" / "knowledge.db")
+    try:
+        records = store.list_all_source_records()
+    finally:
+        store.close()
+    assert len(records) == 1
+    assert records[0].title == "Default interpreter assumption breaks validation"
 
 
 def test_graph_marks_failed_session_without_processing_it(tmp_path: Path, monkeypatch) -> None:
     input_dir = tmp_path / "sessions"
     input_dir.mkdir()
     write_session(input_dir / "session.jsonl")
-    monkeypatch.setattr("consolidate_agent.graph.PitfallExtractor", RaisingExtractor)
+    monkeypatch.setattr("consolidate_agent.extraction.pipeline.PitfallExtractor", RaisingExtractor)
 
     settings = Settings(DASHSCOPE_API_KEY="dummy")
     result = ConsolidationGraph(settings).invoke(make_state(tmp_path, input_dir))
