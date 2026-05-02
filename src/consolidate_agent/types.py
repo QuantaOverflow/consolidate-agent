@@ -203,6 +203,7 @@ class ConsolidationStats(BaseModel):
     canonical_reused: int = 0
     classification_failures: int = 0
     tags_created: int = 0
+    tags_merged: int = 0
     tag_proposals_created: int = 0
     rules_tagged: int = 0
     rules_classified: int = 0

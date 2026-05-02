@@ -10,7 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
 from consolidate_agent.config import Settings
-from consolidate_agent.consolidation._utils import _chat_model, _invoke_with_retry, _token_overlap
+from consolidate_agent.consolidation._utils import _chat_model, _invoke_structured, _invoke_with_retry, _token_overlap
 from consolidate_agent.observability import AgentInvocationRecorder, NullAgentInvocationRecorder
 from consolidate_agent.prompt_loader import load_prompt
 from consolidate_agent.types import (
@@ -67,6 +67,16 @@ class TaxonomyGovernanceDecision(BaseModel):
 
 class TaxonomyGovernanceResult(BaseModel):
     decisions: list[TaxonomyGovernanceDecision] = Field(default_factory=list)
+
+
+class TagMergeDecision(BaseModel):
+    keep: str
+    merge: str
+    reason: str
+
+
+class TagDeduplicationResult(BaseModel):
+    merges: list[TagMergeDecision] = Field(default_factory=list)
 
 
 class TaxonomyValidationError(ValueError):
@@ -134,6 +144,74 @@ class LLMTaxonomyDrafter:
             run_id=self.run_id,
             validator=lambda result: validate_taxonomy_draft(result, canonicals, active_tags),
             empty_error="Taxonomy draft returned no structured result.",
+        )
+
+
+class LLMTagDeduplicator:
+    def __init__(self, settings: Settings, recorder: AgentInvocationRecorder | None = None, run_id: str | None = None):
+        self.recorder = recorder or NullAgentInvocationRecorder()
+        self.run_id = run_id
+        self.structured_model = _chat_model(settings).with_structured_output(TagDeduplicationResult)
+        self.prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "You identify mechanism tags whose failure patterns functionally overlap. "
+                    "Two tags overlap when a developer making the same mistake could be described by both — "
+                    "even if their framing or scope differs. "
+                    "The keep tag should be the more general or precise one. "
+                    "Each tag name in merges must appear exactly once across all merge decisions.",
+                ),
+                (
+                    "user",
+                    "Review the full active tag list below. Each item has a name and definition.\n\n"
+                    "{{ tags_json }}\n\n"
+                    "Return a merges list where each entry has keep, merge, and reason. "
+                    "A tag may appear as merge in at most one decision. "
+                    "If no tags functionally overlap, return an empty merges list.",
+                ),
+            ],
+            template_format="jinja2",
+        )
+        self.retry_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "You identify mechanism tags whose failure patterns functionally overlap. "
+                    "Two tags overlap when a developer making the same mistake could be described by both. "
+                    "Each tag name in merges must appear exactly once across all merge decisions.",
+                ),
+                (
+                    "user",
+                    "Review the full active tag list below.\n\n"
+                    "{{ tags_json }}\n\n"
+                    "Your previous attempt failed validation:\n{{ validation_error }}\n"
+                    "Previous result:\n{{ invalid_result_json }}\n\n"
+                    "Fix the conflicts and return a corrected merges list. "
+                    "A tag may appear as merge in at most one decision.",
+                ),
+            ],
+            template_format="jinja2",
+        )
+
+    def deduplicate(self, tags: list[MechanismTag]) -> TagDeduplicationResult:
+        values = {
+            "tags_json": json.dumps(
+                [{"name": tag.name, "definition": tag.definition} for tag in tags],
+                ensure_ascii=False,
+                indent=2,
+            )
+        }
+        return _invoke_with_retry(
+            stage="tag_dedup",
+            structured_model=self.structured_model,
+            prompt=self.prompt,
+            retry_prompt=self.retry_prompt,
+            values=values,
+            recorder=self.recorder,
+            run_id=self.run_id,
+            validator=lambda result: validate_tag_deduplication(result, tags),
+            empty_error="Tag deduplication returned no structured result.",
         )
 
 
@@ -304,6 +382,33 @@ def validate_taxonomy_governance(result: TaxonomyGovernanceResult, proposals: li
             raise ValueError(f"Accept decision missing accepted_tag: {decision.proposal_name}")
         if decision.decision == "merge" and normalize_tag_name(decision.target_tag_name or "") not in active_names | accepted_names:
             raise ValueError(f"Merge target is not active or accepted: {decision.target_tag_name}")
+
+
+def validate_tag_deduplication(result: TagDeduplicationResult, tags: list[MechanismTag]) -> None:
+    tag_names = {normalize_tag_name(tag.name) for tag in tags}
+    merge_targets: dict[str, str] = {}
+    for decision in result.merges:
+        keep = normalize_tag_name(decision.keep)
+        merge = normalize_tag_name(decision.merge)
+        if keep not in tag_names:
+            raise ValueError(f"Tag deduplication keep tag is not active: {decision.keep}")
+        if merge not in tag_names:
+            raise ValueError(f"Tag deduplication merge tag is not active: {decision.merge}")
+        if keep == merge:
+            raise ValueError(f"Tag deduplication cannot merge a tag into itself: {decision.merge}")
+        existing = merge_targets.get(merge)
+        if existing is not None and existing != keep:
+            raise ValueError(f"Tag deduplication merge target is ambiguous: {decision.merge}")
+        merge_targets[merge] = keep
+
+    for merge in merge_targets:
+        seen: set[str] = set()
+        current = merge
+        while current in merge_targets:
+            if current in seen:
+                raise ValueError("Tag deduplication contains a merge cycle.")
+            seen.add(current)
+            current = merge_targets[current]
 
 
 def tag_from_draft(draft: MechanismTagDraft) -> MechanismTag:

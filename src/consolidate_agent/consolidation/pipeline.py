@@ -33,6 +33,7 @@ from consolidate_agent.consolidation.taxonomy import (
     DeterministicTaxonomyDrafter,
     DeterministicTaxonomyGovernor,
     LLMAgentTagGovernor,
+    LLMTagDeduplicator,
     LLMTaxonomyDrafter,
     TaxonomyDraftResult,
     TaxonomyGovernanceResult,
@@ -81,6 +82,7 @@ class ConsolidationService:
         taxonomy_drafter: DeterministicTaxonomyDrafter | LLMTaxonomyDrafter | None = None,
         tag_coverage_checker: DeterministicTagCoverageChecker | LLMTagCoverageChecker | None = None,
         taxonomy_governor: DeterministicTaxonomyGovernor | LLMAgentTagGovernor | None = None,
+        tag_deduplicator: LLMTagDeduplicator | None = None,
         rule_classifier: DeterministicRuleClassifier | LLMRuleClassifier | None = None,
         vector_store: KnowledgeVectorStore | None = None,
         run_id: str | None = None,
@@ -92,6 +94,7 @@ class ConsolidationService:
         self.taxonomy_drafter = taxonomy_drafter or DeterministicTaxonomyDrafter()
         self.tag_coverage_checker = tag_coverage_checker or DeterministicTagCoverageChecker()
         self.taxonomy_governor = taxonomy_governor or DeterministicTaxonomyGovernor()
+        self.tag_deduplicator = tag_deduplicator
         self.vector_store = vector_store
         self.rule_classifier = rule_classifier or DeterministicRuleClassifier(vector_store=vector_store)
 
@@ -112,6 +115,7 @@ class ConsolidationService:
         graph.add_node("canonicalize_sources", self._canonicalize_sources)
         graph.add_node("taxonomy_draft", self._taxonomy_draft)
         graph.add_node("taxonomy_governance", self._taxonomy_governance)
+        graph.add_node("tag_dedup", self._tag_dedup)
         graph.add_node("rule_classification", self._rule_classification)
         graph.add_node("tag_coverage_check", self._tag_coverage_check)
         graph.add_node("rule_classification_uncovered", self._rule_classification_uncovered)
@@ -130,10 +134,11 @@ class ConsolidationService:
             "taxonomy_governance",
             self._route_after_governance,
             {
-                "cold_start": "rule_classification",
+                "cold_start": "tag_dedup",
                 "warm_start": "rule_classification_uncovered",
             },
         )
+        graph.add_edge("tag_dedup", "rule_classification")
         graph.add_conditional_edges(
             "rule_classification",
             self._route_after_rule_classification,
@@ -310,6 +315,44 @@ class ConsolidationService:
         _progress(f"taxonomy_governance done decisions={decision_counts} governance_assignments={len(governance_assignments)}")
         return {**state, "stats": stats, "governance": governance, "governed_tags": governed_tags, "governance_assignments": governance_assignments}
 
+    def _tag_dedup(self, state: ConsolidationGraphState) -> ConsolidationGraphState:
+        if self.tag_deduplicator is None:
+            return state
+
+        stats = state["stats"]
+        active_tags = self.store.list_active_tags()
+        if len(active_tags) < 2:
+            return {**state, "active_tags": active_tags, "governed_tags": active_tags, "stats": stats}
+
+        _progress(f"tag_dedup start active_tags={len(active_tags)}")
+        result = self.tag_deduplicator.deduplicate(active_tags)
+        tag_by_name = {normalize_tag_name(tag.name): tag for tag in active_tags}
+        merged_names: set[str] = set()
+        merged_to_keep_name: dict[str, str] = {}
+        for decision in result.merges:
+            keep = tag_by_name[normalize_tag_name(decision.keep)]
+            merge = tag_by_name[normalize_tag_name(decision.merge)]
+            self.store.merge_tag(keep.tag_id, merge.tag_id)
+            merged_names.add(normalize_tag_name(merge.name))
+            merged_to_keep_name[normalize_tag_name(merge.name)] = keep.name
+            stats.tags_merged += 1
+
+        active_tags = [tag for tag in active_tags if normalize_tag_name(tag.name) not in merged_names]
+        governance_assignments = [
+            assignment.model_copy(
+                update={"tag_name": merged_to_keep_name.get(normalize_tag_name(assignment.tag_name), assignment.tag_name)}
+            )
+            for assignment in state.get("governance_assignments", [])
+        ]
+        _progress(f"tag_dedup done merges={len(result.merges)} active_tags={len(active_tags)}")
+        return {
+            **state,
+            "stats": stats,
+            "active_tags": active_tags,
+            "governed_tags": active_tags,
+            "governance_assignments": governance_assignments,
+        }
+
     def _rule_classification(self, state: ConsolidationGraphState) -> ConsolidationGraphState:
         canonicals = state["canonicals"]
         governed_tags = state.get("governed_tags", state["active_tags"])
@@ -430,9 +473,11 @@ def run_consolidation(
             taxonomy_drafter = LLMTaxonomyDrafter(settings, recorder=store.runs, run_id=run_id)
             tag_coverage_checker = LLMTagCoverageChecker(settings, recorder=store.runs, run_id=run_id)
             taxonomy_governor = LLMAgentTagGovernor(settings, vector_store, recorder=store.runs, run_id=run_id)
+            tag_deduplicator = LLMTagDeduplicator(settings)
             rule_classifier = DeterministicRuleClassifier(vector_store=vector_store)
         elif settings is not None:
             vector_store = None
+            tag_deduplicator = None
             canonicalizer = DeterministicCanonicalizer()
             taxonomy_drafter = DeterministicTaxonomyDrafter()
             tag_coverage_checker = DeterministicTagCoverageChecker()
@@ -440,6 +485,7 @@ def run_consolidation(
             rule_classifier = DeterministicRuleClassifier()
         else:
             vector_store = None
+            tag_deduplicator = None
             canonicalizer = canonicalizer or DeterministicCanonicalizer()
             taxonomy_drafter = taxonomy_drafter or DeterministicTaxonomyDrafter()
             tag_coverage_checker = tag_coverage_checker or DeterministicTagCoverageChecker()
@@ -451,6 +497,7 @@ def run_consolidation(
             taxonomy_drafter=taxonomy_drafter,
             tag_coverage_checker=tag_coverage_checker,
             taxonomy_governor=taxonomy_governor,
+            tag_deduplicator=tag_deduplicator,
             rule_classifier=rule_classifier,
             vector_store=vector_store,
             run_id=run_id,

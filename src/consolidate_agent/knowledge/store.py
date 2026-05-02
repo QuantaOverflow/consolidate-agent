@@ -328,6 +328,7 @@ class KnowledgeStore:
         self._ensure_column("consolidation_failures", "run_id", "TEXT")
         self._ensure_column("canonical_knowledge", "embedding", "TEXT")
         self._ensure_column("mechanism_tags", "embedding", "TEXT")
+        self._ensure_column("rule_tag_assignments", "updated_at", "TEXT")
         self.connection.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -583,8 +584,8 @@ class KnowledgeStore:
             return False
         self.connection.execute(
             """
-            INSERT INTO rule_tag_assignments (canonical_id, tag_id, confidence, assignment_reason, linked_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO rule_tag_assignments (canonical_id, tag_id, confidence, assignment_reason, linked_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 assignment.canonical_id,
@@ -592,10 +593,33 @@ class KnowledgeStore:
                 assignment.confidence,
                 assignment.assignment_reason,
                 assignment.linked_at.isoformat(),
+                utc_now().isoformat(),
             ),
         )
         self.connection.commit()
         return True
+
+    def merge_tag(self, keep_id: str, merge_id: str) -> None:
+        now = utc_now().isoformat()
+        with self._lock:
+            self._ensure_column("rule_tag_assignments", "updated_at", "TEXT")
+            with self.connection:
+                self.connection.execute(
+                    """
+                    UPDATE mechanism_tags
+                    SET status = ?, merged_into_tag_id = ?, updated_at = ?
+                    WHERE tag_id = ?
+                    """,
+                    (MechanismTagStatus.MERGED.value, keep_id, now, merge_id),
+                )
+                self.connection.execute(
+                    """
+                    UPDATE rule_tag_assignments
+                    SET tag_id = ?, updated_at = ?
+                    WHERE tag_id = ?
+                    """,
+                    (keep_id, now, merge_id),
+                )
 
     def increment_canonical_support(self, canonical_id: str) -> None:
         self.connection.execute(
