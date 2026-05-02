@@ -338,11 +338,27 @@ Summarize your reasoning and final decision (accept, merge, or reject)."""
                 f"Active tags: {active_tags_text}\n\n"
                 f"Research summary:\n{agent_summary}"),
         ], template_format="jinja2")
-        decision = None
-        for _ in range(3):
-            decision = self._structured_model.invoke(extract_prompt.invoke({}))
-            if decision is not None:
-                break
+        from langchain_core.messages import HumanMessage as _HumanMessage
+        prompt_value = extract_prompt.invoke({})
+        decision = self._structured_model.invoke(prompt_value)
+        if decision is None:
+            base_messages = prompt_value.to_messages()
+            for attempt in range(2):
+                retry_messages = base_messages + [
+                    _HumanMessage(content=(
+                        "Your previous response did not produce a valid structured output. "
+                        f"You MUST return a JSON object with: "
+                        f"proposal_name exactly \"{proposal.name}\", "
+                        f"decision as one of: accept, merge, reject. "
+                        f"For 'accept': include accepted_tag (name, definition, positive_examples, negative_examples). "
+                        f"For 'merge': set target_tag_name to an existing active tag name. "
+                        f"For 'reject': no extra fields needed. "
+                        f"Attempt {attempt + 2}/3."
+                    ))
+                ]
+                decision = self._structured_model.invoke(retry_messages)
+                if decision is not None:
+                    break
         if decision is None:
             raise ValueError(f"LLMAgentTagGovernor failed to extract structured decision for proposal '{proposal.name}'")
         decision.proposal_name = proposal.name

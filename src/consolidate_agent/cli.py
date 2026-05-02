@@ -7,6 +7,7 @@ from pathlib import Path
 from consolidate_agent.consolidation.pipeline import run_consolidation
 from consolidate_agent.config import Settings
 from consolidate_agent.extraction.pipeline import ConsolidationGraph
+from consolidate_agent.knowledge_extraction.pipeline import run_knowledge_extraction
 from consolidate_agent.knowledge.store import KnowledgeStore
 from consolidate_agent.types import PipelineState
 
@@ -22,6 +23,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-limit", type=int, default=None, help="Limit the number of sessions")
     parser.add_argument("--max-chunk-chars", type=int, default=None, help="Maximum approximate chars per extraction chunk")
     parser.add_argument("--overlap-messages", type=int, default=None, help="Number of messages to overlap between chunks")
+    parser.add_argument("--extract-knowledge", action="store_true", help="Run knowledge extraction pipeline on sessions")
+    parser.add_argument("--knowledge-processed-index-path", help="Processed index path for knowledge extraction")
+    parser.add_argument(
+        "--max-session-chars",
+        type=int,
+        default=100_000,
+        help="Max processed chars per session for knowledge extraction",
+    )
     parser.add_argument("--run-consolidation", action="store_true", help="Run post-processing knowledge consolidation")
     parser.add_argument("--report", action="store_true", help="Print an observability report for the latest consolidation run")
     return parser
@@ -34,8 +43,28 @@ def main() -> None:
     output_dir = Path(args.output_dir or settings.output_dir_path).expanduser()
     cursor_path = Path(args.cursor_path or settings.cursor_path).expanduser()
     processed_index_path = Path(args.processed_index_path or settings.processed_index_path).expanduser()
+    knowledge_processed_index_path = Path(
+        args.knowledge_processed_index_path or settings.knowledge_processed_index_path
+    ).expanduser()
     knowledge_db_path = Path(args.knowledge_db_path or settings.knowledge_db_path).expanduser()
     session_index_path = Path(args.session_index or settings.session_index_path).expanduser()
+
+    if args.extract_knowledge:
+        stats = run_knowledge_extraction(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            processed_index_path=knowledge_processed_index_path,
+            knowledge_db_path=knowledge_db_path,
+            settings=settings,
+            sample_limit=args.sample_limit,
+            max_session_chars=args.max_session_chars,
+        )
+        print(f"Knowledge extracted: {stats.extracted_count}")
+        print(f"Knowledge admitted: {stats.admitted_count}")
+        print(f"Knowledge rejected: {stats.rejected_count}")
+        print(f"Sessions processed: {stats.processed_sessions}")
+        print(f"Sessions failed: {stats.failed_sessions}")
+        return
 
     state = PipelineState(
         input_dir=str(input_dir),

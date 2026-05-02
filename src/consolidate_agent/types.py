@@ -30,6 +30,12 @@ class PitfallScope(str, Enum):
     SESSION_SPECIFIC = "session_specific"
 
 
+class KnowledgeScope(str, Enum):
+    GLOBAL = "global"
+    PROJECT_SPECIFIC = "project_specific"
+    SESSION_SPECIFIC = "session_specific"
+
+
 class AdmissionStatus(str, Enum):
     PENDING = "pending"
     ACCEPTED = "accepted"
@@ -140,6 +146,21 @@ class PitfallRecord(BaseModel):
     updated_at: datetime
 
 
+class KnowledgeRecord(BaseModel):
+    id: str
+    session_id: str
+    title: str
+    insight: str
+    applicability: str
+    scope: KnowledgeScope
+    evidence_turns: list[int] = Field(default_factory=list)
+    evidence_count: int
+    evidence_spread: float
+    processed_chars: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class CanonicalKnowledge(BaseModel):
     canonical_id: str
     title: str
@@ -243,6 +264,16 @@ class RunStats(BaseModel):
     chunk_count: int = 0
     candidate_count: int = 0
     accepted_count: int = 0
+    rejected_count: int = 0
+
+
+class KnowledgeExtractionStats(BaseModel):
+    discovered_sessions: int = 0
+    skipped_sessions: int = 0
+    processed_sessions: int = 0
+    failed_sessions: int = 0
+    extracted_count: int = 0
+    admitted_count: int = 0
     rejected_count: int = 0
 
 

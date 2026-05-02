@@ -9,8 +9,10 @@ from pathlib import Path
 from consolidate_agent.types import (
     CanonicalKnowledge,
     CanonicalKnowledgeStatus,
+    KnowledgeRecord,
     KnowledgeInstanceLink,
     KnowledgeRelation,
+    KnowledgeScope,
     MechanismTag,
     MechanismTagStatus,
     PitfallCategory,
@@ -323,6 +325,21 @@ class KnowledgeStore:
                 latency_ms INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS source_knowledge_records (
+                record_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                insight TEXT NOT NULL,
+                applicability TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                evidence_turns_json TEXT NOT NULL,
+                evidence_count INTEGER NOT NULL,
+                evidence_spread REAL NOT NULL,
+                processed_chars INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         self._ensure_column("consolidation_failures", "run_id", "TEXT")
@@ -447,6 +464,64 @@ class KnowledgeStore:
             """
         ).fetchall()
         return [PitfallRecord.model_validate(json.loads(row["payload_json"])) for row in rows]
+
+    def upsert_knowledge_record(self, record: KnowledgeRecord) -> bool:
+        existing = self.connection.execute(
+            "SELECT record_id FROM source_knowledge_records WHERE record_id = ?",
+            (record.id,),
+        ).fetchone()
+        self.connection.execute(
+            """
+            INSERT INTO source_knowledge_records (
+                record_id, session_id, title, insight, applicability, scope,
+                evidence_turns_json, evidence_count, evidence_spread,
+                processed_chars, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(record_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                title = excluded.title,
+                insight = excluded.insight,
+                applicability = excluded.applicability,
+                scope = excluded.scope,
+                evidence_turns_json = excluded.evidence_turns_json,
+                evidence_count = excluded.evidence_count,
+                evidence_spread = excluded.evidence_spread,
+                processed_chars = excluded.processed_chars,
+                updated_at = excluded.updated_at
+            """,
+            (
+                record.id,
+                record.session_id,
+                record.title,
+                record.insight,
+                record.applicability,
+                record.scope.value,
+                json.dumps(record.evidence_turns, ensure_ascii=False),
+                record.evidence_count,
+                record.evidence_spread,
+                record.processed_chars,
+                record.created_at.isoformat(),
+                record.updated_at.isoformat(),
+            ),
+        )
+        self.connection.commit()
+        return existing is None
+
+    def list_all_knowledge_records(self) -> list[KnowledgeRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT record_id, session_id, title, insight, applicability, scope,
+                   evidence_turns_json, evidence_count, evidence_spread,
+                   processed_chars, created_at, updated_at
+            FROM source_knowledge_records
+            ORDER BY record_id
+            """
+        ).fetchall()
+        return [_knowledge_record_from_row(row) for row in rows]
+
+    def count_knowledge_records(self) -> int:
+        row = self.connection.execute("SELECT COUNT(*) AS count FROM source_knowledge_records").fetchone()
+        return int(row["count"])
 
     def list_canonicals_by_category(self, category: PitfallCategory) -> list[CanonicalKnowledge]:
         rows = self.connection.execute(
@@ -941,6 +1016,23 @@ def _tag_from_row(row: sqlite3.Row) -> MechanismTag:
         positive_examples=json.loads(row["positive_examples_json"]),
         negative_examples=json.loads(row["negative_examples_json"]),
         merged_into_tag_id=row["merged_into_tag_id"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _knowledge_record_from_row(row: sqlite3.Row) -> KnowledgeRecord:
+    return KnowledgeRecord(
+        id=row["record_id"],
+        session_id=row["session_id"],
+        title=row["title"],
+        insight=row["insight"],
+        applicability=row["applicability"],
+        scope=KnowledgeScope(row["scope"]),
+        evidence_turns=json.loads(row["evidence_turns_json"]),
+        evidence_count=int(row["evidence_count"]),
+        evidence_spread=float(row["evidence_spread"]),
+        processed_chars=int(row["processed_chars"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

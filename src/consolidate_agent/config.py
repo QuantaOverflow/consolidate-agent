@@ -31,6 +31,10 @@ class Settings(BaseSettings):
         default="./outputs/knowledge.db",
         alias="CONSOLIDATE_KNOWLEDGE_DB_PATH",
     )
+    knowledge_processed_index_path: str = Field(
+        default="./outputs/knowledge-processed-index.json",
+        alias="KNOWLEDGE_PROCESSED_INDEX_PATH",
+    )
     consolidate_max_chunk_chars: int = Field(default=30000, alias="CONSOLIDATE_MAX_CHUNK_CHARS")
     consolidate_overlap_messages: int = Field(default=5, alias="CONSOLIDATE_OVERLAP_MESSAGES")
 
@@ -57,3 +61,7 @@ class Settings(BaseSettings):
     @property
     def knowledge_db_path(self) -> Path:
         return Path(self.consolidate_knowledge_db_path).expanduser()
+
+    @property
+    def knowledge_processed_index(self) -> Path:
+        return Path(self.knowledge_processed_index_path).expanduser()

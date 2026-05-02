@@ -1,6 +1,16 @@
 # Async Consolidate Agent
 
-Offline-first pitfall extraction pipeline for Codex session history.
+Offline-first knowledge consolidation tools for Codex session history.
+
+The project currently has three runnable tracks:
+
+- `pitfall extraction`: normalize Codex sessions, split large transcripts,
+  extract pitfall candidates, admit reusable pitfall records, and write
+  `outputs/candidates.json` plus source records in SQLite.
+- `knowledge extraction`: convert complete sessions into compact XML, extract
+  transferable knowledge records, and write them to `source_knowledge_records`.
+- `consolidation`: canonicalize admitted pitfall source records, govern
+  mechanism tags, classify canonical rules, and persist rule-tag assignments.
 
 ## Development
 
@@ -15,6 +25,40 @@ Run the CLI:
 
 ```bash
 uv run consolidate-agent --help
+```
+
+Run pitfall extraction:
+
+```bash
+uv run python -m consolidate_agent \
+  --sample-limit 20 \
+  --output-dir ./outputs \
+  --processed-index-path ./outputs/processed-index.json \
+  --knowledge-db-path ./outputs/knowledge.db
+```
+
+Run generic session knowledge extraction:
+
+```bash
+uv run python -m consolidate_agent \
+  --extract-knowledge \
+  --sample-limit 20 \
+  --knowledge-processed-index-path ./outputs/knowledge-processed-index.json \
+  --knowledge-db-path ./outputs/knowledge.db \
+  --max-session-chars 100000
+```
+
+Run pitfall extraction plus consolidation:
+
+```bash
+uv run python -m consolidate_agent \
+  --sample-limit 50 \
+  --output-dir /tmp/consolidate-real-sessions-50-output \
+  --cursor-path /tmp/consolidate-real-sessions-50-output/cursor.json \
+  --processed-index-path /tmp/consolidate-real-sessions-50-output/processed-index.json \
+  --knowledge-db-path /tmp/knowledge-real-sessions-50.db \
+  --run-consolidation \
+  --report
 ```
 
 ## Current Consolidation Mode
@@ -45,19 +89,10 @@ classification.
 `LLMTagCoverageChecker` decides which omitted canonical rules cannot be covered
 by existing active tags before the workflow drafts new taxonomy proposals.
 
-Run a larger sample with consolidation and an observability report:
-
-```bash
-uv run python -m consolidate_agent.cli \
-  --sample-limit 50 \
-  --output-dir /tmp/consolidate-real-sessions-50-output \
-  --cursor-path /tmp/consolidate-real-sessions-50-output/cursor.json \
-  --processed-index-path /tmp/consolidate-real-sessions-50-output/processed-index.json \
-  --knowledge-db-path /tmp/knowledge-real-sessions-50.db \
-  --run-consolidation \
-  --report
-```
-
 The abstract pattern layer is intentionally out of the active extraction path.
 It can be reintroduced later only if governed tags become stable enough to
 support a higher-level abstraction that is not just a duplicate of tag profiles.
+
+Generic session knowledge records are intentionally parallel to the pitfall
+consolidation graph today. They are persisted for later retrieval and review,
+but they are not yet canonicalized into rules or mechanism tags.
