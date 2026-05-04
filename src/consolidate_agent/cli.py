@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from consolidate_agent.consolidation.pipeline import run_consolidation
@@ -9,6 +10,7 @@ from consolidate_agent.config import Settings
 from consolidate_agent.extraction.pipeline import ConsolidationGraph
 from consolidate_agent.knowledge_extraction.pipeline import run_knowledge_extraction
 from consolidate_agent.knowledge.store import KnowledgeStore
+from consolidate_agent.knowledge.vector import KnowledgeVectorStore, create_dashscope_embeddings
 from consolidate_agent.types import PipelineState
 
 
@@ -33,11 +35,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--run-consolidation", action="store_true", help="Run post-processing knowledge consolidation")
     parser.add_argument("--report", action="store_true", help="Print an observability report for the latest consolidation run")
+    parser.add_argument("--embed", action="store_true", help="Build embedding indexes for pitfall and knowledge records")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.embed and args.extract_knowledge:
+        print("Error: --embed and --extract-knowledge are mutually exclusive")
+        sys.exit(1)
+
     settings = Settings()
     input_dir = Path(args.input_dir or settings.sessions_dir_path).expanduser()
     output_dir = Path(args.output_dir or settings.output_dir_path).expanduser()
@@ -48,6 +55,24 @@ def main() -> None:
     ).expanduser()
     knowledge_db_path = Path(args.knowledge_db_path or settings.knowledge_db_path).expanduser()
     session_index_path = Path(args.session_index or settings.session_index_path).expanduser()
+
+    if args.embed:
+        store = KnowledgeStore(knowledge_db_path)
+        try:
+            vector_store = KnowledgeVectorStore(store, create_dashscope_embeddings(settings))
+            canonicals = store.list_active_canonicals()
+            knowledge_records = store.list_all_knowledge_records()
+            missing_canonicals = sum(
+                1 for canonical in canonicals if store.get_canonical_embedding(canonical.canonical_id) is None
+            )
+            missing_knowledge_records = len(store.list_knowledge_records_without_embedding())
+            vector_store.embed_canonicals(canonicals)
+            vector_store.embed_knowledge_records(knowledge_records)
+            print(f"Embedded canonicals: {missing_canonicals}")
+            print(f"Embedded knowledge records: {missing_knowledge_records}")
+        finally:
+            store.close()
+        return
 
     if args.extract_knowledge:
         stats = run_knowledge_extraction(

@@ -344,6 +344,7 @@ class KnowledgeStore:
         )
         self._ensure_column("consolidation_failures", "run_id", "TEXT")
         self._ensure_column("canonical_knowledge", "embedding", "TEXT")
+        self._ensure_column("source_knowledge_records", "embedding", "TEXT")
         self._ensure_column("mechanism_tags", "embedding", "TEXT")
         self._ensure_column("rule_tag_assignments", "updated_at", "TEXT")
         self.connection.commit()
@@ -415,45 +416,58 @@ class KnowledgeStore:
         ).fetchall()
         return [PitfallRecord.model_validate(json.loads(row["payload_json"])) for row in rows]
 
-    def get_canonical_embedding(self, canonical_id: str) -> list[float] | None:
+    def _get_embedding(self, table: str, key_column: str, key: str) -> list[float] | None:
         with self._lock:
-            self._ensure_column("canonical_knowledge", "embedding", "TEXT")
             row = self.connection.execute(
-                "SELECT embedding FROM canonical_knowledge WHERE canonical_id = ?",
-                (canonical_id,),
+                f"SELECT embedding FROM {table} WHERE {key_column} = ?",
+                (key,),
             ).fetchone()
         if row is None or row["embedding"] is None:
             return None
         return [float(value) for value in json.loads(row["embedding"])]
+
+    def _save_embedding(self, table: str, key_column: str, key: str, embedding: list[float]) -> None:
+        with self._lock:
+            cursor = self.connection.execute(
+                f"UPDATE {table} SET embedding = ?, updated_at = ? WHERE {key_column} = ?",
+                (json.dumps(embedding), utc_now().isoformat(), key),
+            )
+            if cursor.rowcount == 0:
+                self.connection.rollback()
+                raise ValueError(f"No record found for {key_column}={key!r} in {table}")
+            self.connection.commit()
+
+    def get_canonical_embedding(self, canonical_id: str) -> list[float] | None:
+        return self._get_embedding("canonical_knowledge", "canonical_id", canonical_id)
 
     def save_canonical_embedding(self, canonical_id: str, embedding: list[float]) -> None:
+        self._save_embedding("canonical_knowledge", "canonical_id", canonical_id, embedding)
+
+    def save_knowledge_embedding(self, record_id: str, embedding: list[float]) -> None:
+        self._save_embedding("source_knowledge_records", "record_id", record_id, embedding)
+
+    def get_knowledge_embedding(self, record_id: str) -> list[float] | None:
+        return self._get_embedding("source_knowledge_records", "record_id", record_id)
+
+    def list_knowledge_records_without_embedding(self) -> list[KnowledgeRecord]:
         with self._lock:
-            self._ensure_column("canonical_knowledge", "embedding", "TEXT")
-            self.connection.execute(
-                "UPDATE canonical_knowledge SET embedding = ?, updated_at = ? WHERE canonical_id = ?",
-                (json.dumps(embedding), utc_now().isoformat(), canonical_id),
-            )
-            self.connection.commit()
+            rows = self.connection.execute(
+                """
+                SELECT record_id, session_id, title, insight, applicability, scope,
+                       evidence_turns_json, evidence_count, evidence_spread,
+                       processed_chars, created_at, updated_at
+                FROM source_knowledge_records
+                WHERE embedding IS NULL
+                ORDER BY record_id
+                """
+            ).fetchall()
+        return [_knowledge_record_from_row(row) for row in rows]
 
     def get_tag_embedding(self, tag_id: str) -> list[float] | None:
-        with self._lock:
-            self._ensure_column("mechanism_tags", "embedding", "TEXT")
-            row = self.connection.execute(
-                "SELECT embedding FROM mechanism_tags WHERE tag_id = ?",
-                (tag_id,),
-            ).fetchone()
-        if row is None or row["embedding"] is None:
-            return None
-        return [float(value) for value in json.loads(row["embedding"])]
+        return self._get_embedding("mechanism_tags", "tag_id", tag_id)
 
     def save_tag_embedding(self, tag_id: str, embedding: list[float]) -> None:
-        with self._lock:
-            self._ensure_column("mechanism_tags", "embedding", "TEXT")
-            self.connection.execute(
-                "UPDATE mechanism_tags SET embedding = ?, updated_at = ? WHERE tag_id = ?",
-                (json.dumps(embedding), utc_now().isoformat(), tag_id),
-            )
-            self.connection.commit()
+        self._save_embedding("mechanism_tags", "tag_id", tag_id, embedding)
 
     def list_all_source_records(self) -> list[PitfallRecord]:
         rows = self.connection.execute(

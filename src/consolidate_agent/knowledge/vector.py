@@ -11,9 +11,10 @@ from langchain_core.vectorstores import VectorStore
 
 from consolidate_agent.config import Settings
 from consolidate_agent.knowledge.store import KnowledgeStore
-from consolidate_agent.types import CanonicalKnowledge, MechanismTag
+from consolidate_agent.types import CanonicalKnowledge, KnowledgeRecord, MechanismTag
 
 SIMILARITY_THRESHOLD = 0.3
+KNOWLEDGE_RELATEDNESS_THRESHOLD = 0.7
 
 
 class DashScopeOpenAICompatibleEmbeddings(Embeddings):
@@ -92,6 +93,14 @@ class KnowledgeVectorStore(VectorStore):
         for tag, embedding in zip(missing, vectors, strict=True):
             self.store.save_tag_embedding(tag.tag_id, embedding)
 
+    def embed_knowledge_records(self, records: list[KnowledgeRecord]) -> None:
+        missing = [record for record in records if self.store.get_knowledge_embedding(record.id) is None]
+        if not missing:
+            return
+        vectors = self.embeddings.embed_documents([_knowledge_record_text(record) for record in missing])
+        for record, embedding in zip(missing, vectors, strict=True):
+            self.store.save_knowledge_embedding(record.id, embedding)
+
     def find_best_tag(self, canonical: CanonicalKnowledge, tags: list[MechanismTag]) -> tuple[MechanismTag | None, float]:
         if not tags:
             return None, 0.0
@@ -153,6 +162,45 @@ class KnowledgeVectorStore(VectorStore):
         raise NotImplementedError("KnowledgeVectorStore must be initialized with an existing KnowledgeStore.")
 
 
+def find_related_knowledge(
+    store: KnowledgeStore,
+    embeddings: Embeddings,
+    canonical_id: str,
+    threshold: float = KNOWLEDGE_RELATEDNESS_THRESHOLD,
+    top_k: int = 3,
+) -> list[dict]:
+    _ = embeddings
+    canonical_embedding = store.get_canonical_embedding(canonical_id)
+    if canonical_embedding is None:
+        return []
+
+    records = store.list_all_knowledge_records()
+    if not records:
+        return []
+
+    scored = []
+    for record in records:
+        embedding = store.get_knowledge_embedding(record.id)
+        if embedding is None:
+            continue
+        score = _cosine_similarity(canonical_embedding, embedding)
+        if score >= threshold:
+            scored.append((score, record))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [
+        {
+            "record_id": record.id,
+            "title": record.title,
+            "insight": record.insight,
+            "applicability": record.applicability,
+            "scope": record.scope.value,
+            "similarity_score": score,
+        }
+        for score, record in scored[:top_k]
+    ]
+
+
 def _canonical_text(canonical: CanonicalKnowledge) -> str:
     return "\n".join(
         [
@@ -172,6 +220,16 @@ def _tag_text(tag: MechanismTag) -> str:
             f"Definition: {tag.definition}",
             f"Positive examples: {'; '.join(tag.positive_examples)}",
             f"Negative examples: {'; '.join(tag.negative_examples)}",
+        ]
+    )
+
+
+def _knowledge_record_text(record: KnowledgeRecord) -> str:
+    return "\n".join(
+        [
+            f"Title: {record.title}",
+            f"Insight: {record.insight}",
+            f"Applicability: {record.applicability}",
         ]
     )
 
