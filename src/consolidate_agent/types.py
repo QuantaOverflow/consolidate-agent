@@ -154,8 +154,7 @@ class KnowledgeRecord(BaseModel):
     applicability: str
     scope: KnowledgeScope
     evidence_turns: list[int] = Field(default_factory=list)
-    evidence_count: int
-    evidence_spread: float
+    evidence_count: int = 0
     processed_chars: int
     created_at: datetime
     updated_at: datetime

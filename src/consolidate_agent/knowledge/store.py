@@ -335,10 +335,17 @@ class KnowledgeStore:
                 scope TEXT NOT NULL,
                 evidence_turns_json TEXT NOT NULL,
                 evidence_count INTEGER NOT NULL,
-                evidence_spread REAL NOT NULL,
+                evidence_spread REAL DEFAULT 0.0,
                 processed_chars INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS processed_sessions (
+                session_id TEXT PRIMARY KEY,
+                xml TEXT NOT NULL,
+                processed_chars INTEGER NOT NULL,
+                created_at TEXT NOT NULL
             );
             """
         )
@@ -357,6 +364,40 @@ class KnowledgeStore:
             self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         except Exception:  # noqa: BLE001 - concurrent threads may race to add the same column
             pass
+
+    def save_processed_session(self, session_id: str, xml: str, processed_chars: int) -> None:
+        with self._lock:
+            self.connection.execute(
+                """
+                INSERT OR REPLACE INTO processed_sessions (session_id, xml, processed_chars, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (session_id, xml, processed_chars, utc_now().isoformat()),
+            )
+            self.connection.commit()
+
+    def get_processed_session(self, session_id: str) -> str | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT xml FROM processed_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return str(row["xml"]) if row is not None else None
+
+    def list_unembedded_sessions(self, embedded_session_ids: set[str]) -> list[tuple[str, str]]:
+        with self._lock:
+            rows = self.connection.execute(
+                """
+                SELECT session_id, xml
+                FROM processed_sessions
+                ORDER BY created_at, session_id
+                """
+            ).fetchall()
+        return [
+            (str(row["session_id"]), str(row["xml"]))
+            for row in rows
+            if str(row["session_id"]) not in embedded_session_ids
+        ]
 
     def upsert_source_record(self, record: PitfallRecord) -> None:
         now = utc_now().isoformat()
@@ -449,12 +490,19 @@ class KnowledgeStore:
     def get_knowledge_embedding(self, record_id: str) -> list[float] | None:
         return self._get_embedding("source_knowledge_records", "record_id", record_id)
 
+    def load_all_knowledge_embeddings(self) -> dict[str, list[float]]:
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT record_id, embedding FROM source_knowledge_records WHERE embedding IS NOT NULL"
+            ).fetchall()
+        return {row[0]: json.loads(row[1]) for row in rows}
+
     def list_knowledge_records_without_embedding(self) -> list[KnowledgeRecord]:
         with self._lock:
             rows = self.connection.execute(
                 """
                 SELECT record_id, session_id, title, insight, applicability, scope,
-                       evidence_turns_json, evidence_count, evidence_spread,
+                       evidence_turns_json, evidence_count,
                        processed_chars, created_at, updated_at
                 FROM source_knowledge_records
                 WHERE embedding IS NULL
@@ -488,9 +536,9 @@ class KnowledgeStore:
             """
             INSERT INTO source_knowledge_records (
                 record_id, session_id, title, insight, applicability, scope,
-                evidence_turns_json, evidence_count, evidence_spread,
+                evidence_turns_json, evidence_count,
                 processed_chars, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(record_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 title = excluded.title,
@@ -499,7 +547,6 @@ class KnowledgeStore:
                 scope = excluded.scope,
                 evidence_turns_json = excluded.evidence_turns_json,
                 evidence_count = excluded.evidence_count,
-                evidence_spread = excluded.evidence_spread,
                 processed_chars = excluded.processed_chars,
                 updated_at = excluded.updated_at
             """,
@@ -512,7 +559,6 @@ class KnowledgeStore:
                 record.scope.value,
                 json.dumps(record.evidence_turns, ensure_ascii=False),
                 record.evidence_count,
-                record.evidence_spread,
                 record.processed_chars,
                 record.created_at.isoformat(),
                 record.updated_at.isoformat(),
@@ -525,7 +571,7 @@ class KnowledgeStore:
         rows = self.connection.execute(
             """
             SELECT record_id, session_id, title, insight, applicability, scope,
-                   evidence_turns_json, evidence_count, evidence_spread,
+                   evidence_turns_json, evidence_count,
                    processed_chars, created_at, updated_at
             FROM source_knowledge_records
             ORDER BY record_id
@@ -1045,7 +1091,6 @@ def _knowledge_record_from_row(row: sqlite3.Row) -> KnowledgeRecord:
         scope=KnowledgeScope(row["scope"]),
         evidence_turns=json.loads(row["evidence_turns_json"]),
         evidence_count=int(row["evidence_count"]),
-        evidence_spread=float(row["evidence_spread"]),
         processed_chars=int(row["processed_chars"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],

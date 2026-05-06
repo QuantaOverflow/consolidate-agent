@@ -5,12 +5,17 @@ import json
 import sys
 from pathlib import Path
 
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_qwq import ChatQwen
+
 from consolidate_agent.consolidation.pipeline import run_consolidation
 from consolidate_agent.config import Settings
 from consolidate_agent.extraction.pipeline import ConsolidationGraph
 from consolidate_agent.knowledge_extraction.pipeline import run_knowledge_extraction
+from consolidate_agent.knowledge.session_turn_store import SessionTurnStore
 from consolidate_agent.knowledge.store import KnowledgeStore
-from consolidate_agent.knowledge.vector import KnowledgeVectorStore, create_dashscope_embeddings
+from consolidate_agent.knowledge.vector import KnowledgeVectorStore, create_dashscope_embeddings, search_knowledge
+from consolidate_agent.prompt_loader import load_prompt
 from consolidate_agent.types import PipelineState
 
 
@@ -36,6 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-consolidation", action="store_true", help="Run post-processing knowledge consolidation")
     parser.add_argument("--report", action="store_true", help="Print an observability report for the latest consolidation run")
     parser.add_argument("--embed", action="store_true", help="Build embedding indexes for pitfall and knowledge records")
+    parser.add_argument("--embed-turns", action="store_true", help="Build embedding index for processed session turns")
+    parser.add_argument("--query", help="Search embedded knowledge records by text")
+    parser.add_argument("--top-k", type=int, default=5, help="Number of knowledge search results to return")
     return parser
 
 
@@ -43,6 +51,12 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.embed and args.extract_knowledge:
         print("Error: --embed and --extract-knowledge are mutually exclusive")
+        sys.exit(1)
+    if args.query is not None and (args.embed or args.extract_knowledge or args.run_consolidation):
+        print("Error: --query is mutually exclusive with --embed, --extract-knowledge, and --run-consolidation")
+        sys.exit(1)
+    if args.embed_turns and (args.embed or args.extract_knowledge or args.run_consolidation or args.report or args.query is not None):
+        print("Error: --embed-turns is mutually exclusive with --embed, --extract-knowledge, --run-consolidation, --report, and --query")
         sys.exit(1)
 
     settings = Settings()
@@ -55,6 +69,74 @@ def main() -> None:
     ).expanduser()
     knowledge_db_path = Path(args.knowledge_db_path or settings.knowledge_db_path).expanduser()
     session_index_path = Path(args.session_index or settings.session_index_path).expanduser()
+
+    if args.embed_turns:
+        store = KnowledgeStore(knowledge_db_path)
+        try:
+            llm = ChatQwen(
+                model=settings.qwen_model,
+                api_key=settings.dashscope_api_key,
+                base_url=settings.dashscope_api_base,
+                temperature=0,
+            )
+            summarization_prompt = ChatPromptTemplate.from_messages(
+                [
+                    ("system", load_prompt("turn_summarization_system.md")),
+                    ("user", load_prompt("turn_summarization_user.md")),
+                ],
+                template_format="jinja2",
+            )
+            translation_prompt = ChatPromptTemplate.from_messages(
+                [
+                    ("system", load_prompt("query_translation_system.md")),
+                    ("user", load_prompt("query_translation_user.md")),
+                ],
+                template_format="jinja2",
+            )
+
+            def summarizer(turn_xml: str) -> str:
+                return (summarization_prompt | llm).invoke({"turn_xml": turn_xml}).content
+
+            def translator(query: str) -> str:
+                return (translation_prompt | llm).invoke({"query": query}).content
+
+            session_turn_store = SessionTurnStore(
+                chroma_path=Path("outputs/chroma/session_turns"),
+                embeddings=create_dashscope_embeddings(settings),
+                summarizer=summarizer,
+                translator=translator,
+            )
+            embedded_ids = session_turn_store.embedded_session_ids()
+            sessions = store.list_unembedded_sessions(embedded_ids)
+            embedded_turn_count = 0
+            for index, (session_id, xml) in enumerate(sessions, start=1):
+                added = session_turn_store.embed_session(session_id, xml)
+                embedded_turn_count += added
+                print(f"Embedding session {index}/{len(sessions)}: {session_id} turns={added}")
+            print(f"Embedded {embedded_turn_count} turns from {len(sessions)} sessions")
+        finally:
+            store.close()
+        return
+
+    if args.query is not None:
+        store = KnowledgeStore(knowledge_db_path)
+        try:
+            results = search_knowledge(
+                store=store,
+                embeddings=create_dashscope_embeddings(settings),
+                query_text=args.query,
+                top_k=args.top_k,
+            )
+            for index, result in enumerate(results, start=1):
+                record = result["record"]
+                score = result["similarity_score"]
+                print(f"[{index}] score={score:.2f} | {record.scope.value}")
+                print(f"    Title: {record.title}")
+                print(f"    Insight: {_truncate(record.insight, 150)}")
+                print(f"    Applicability: {_truncate(record.applicability, 80)}")
+        finally:
+            store.close()
+        return
 
     if args.embed:
         store = KnowledgeStore(knowledge_db_path)
@@ -134,6 +216,14 @@ def main() -> None:
         print(f"Agent failures: {consolidation_stats.agent_failures}")
     if args.report:
         print_observability_report(knowledge_db_path)
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return f"{text[: max_chars - 3]}..."
 
 
 def print_observability_report(db_path: Path) -> None:

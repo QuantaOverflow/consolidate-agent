@@ -11,6 +11,8 @@ The project currently has three runnable tracks:
   transferable knowledge records, and write them to `source_knowledge_records`.
 - `consolidation`: canonicalize admitted pitfall source records, govern
   mechanism tags, classify canonical rules, and persist rule-tag assignments.
+- `embedding index`: embed canonical pitfalls and transferable knowledge
+  records for semantic retrieval.
 
 ## Development
 
@@ -61,6 +63,19 @@ uv run python -m consolidate_agent \
   --report
 ```
 
+Build embedding indexes:
+
+```bash
+uv run python -m consolidate_agent \
+  --knowledge-db-path ./outputs/knowledge.db \
+  --embed
+```
+
+`--embed` is a manual indexing command. It embeds active rows in
+`canonical_knowledge` and rows in `source_knowledge_records`, skips records
+that already have embeddings, and prints how many records were missing
+embeddings before the run.
+
 ## Current Consolidation Mode
 
 The consolidation stage now uses a LangGraph workflow with strict separation
@@ -94,5 +109,6 @@ It can be reintroduced later only if governed tags become stable enough to
 support a higher-level abstraction that is not just a duplicate of tag profiles.
 
 Generic session knowledge records are intentionally parallel to the pitfall
-consolidation graph today. They are persisted for later retrieval and review,
-but they are not yet canonicalized into rules or mechanism tags.
+consolidation graph today. They can be embedded for retrieval and compared
+against embedded canonical pitfalls with `find_related_knowledge`, but they
+are not canonicalized into rules or mechanism tags.

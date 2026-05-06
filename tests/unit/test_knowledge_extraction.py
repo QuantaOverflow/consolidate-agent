@@ -47,6 +47,26 @@ def session_events(session_id: str = "session-1", *, body: str = "x" * 260, sour
             "timestamp": "2026-04-17T09:00:02Z",
             "type": "response_item",
             "payload": {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "call-1",
+                "arguments": json.dumps({"cmd": "pytest tests/"}),
+            },
+        },
+        {
+            "timestamp": "2026-04-17T09:00:03Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "exec_command_end",
+                "call_id": "call-1",
+                "exit_code": 0,
+                "aggregated_output": "1 passed",
+            },
+        },
+        {
+            "timestamp": "2026-04-17T09:00:04Z",
+            "type": "response_item",
+            "payload": {
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": f"The answer contains reusable reasoning. {body}"}],
@@ -63,7 +83,6 @@ class FakeStructuredModel:
                     title="Structured errors",
                     insight="Tool wrappers should return structured errors instead of raising raw exceptions.",
                     applicability="Applies when designing callable tools in agent pipelines.",
-                    evidence_turns=[1, 2],
                     scope=KnowledgeScope.GLOBAL,
                 )
             ]
@@ -92,38 +111,28 @@ def test_knowledge_extractor_extract_returns_structured_items() -> None:
     assert len(items) == 1
     assert items[0].title == "Structured errors"
     assert items[0].scope == KnowledgeScope.GLOBAL
-    assert items[0].evidence_turns == [1, 2]
 
 
-def test_admission_rejects_session_specific_and_empty_evidence() -> None:
+def test_admission_rejects_session_specific_only() -> None:
     admitted, rejected = pipeline._admit_items(
         [
             KnowledgeItemInput(
                 title="Good item",
                 insight="A reusable engineering insight with enough substance.",
                 applicability="Applies to reusable extraction pipelines.",
-                evidence_turns=[1],
                 scope=KnowledgeScope.GLOBAL,
             ),
             KnowledgeItemInput(
                 title="Local fix",
                 insight="This exact repository needs a local one-off fix.",
                 applicability="Only this current session and repository need it.",
-                evidence_turns=[1],
                 scope=KnowledgeScope.SESSION_SPECIFIC,
-            ),
-            KnowledgeItemInput(
-                title="No evidence",
-                insight="A plausible insight without traceable evidence turns.",
-                applicability="Applies nowhere without evidence support.",
-                evidence_turns=[],
-                scope=KnowledgeScope.PROJECT_SPECIFIC,
             ),
         ]
     )
 
     assert [item.title for item in admitted] == ["Good item"]
-    assert [item.title for item in rejected] == ["Local fix", "No evidence"]
+    assert [item.title for item in rejected] == ["Local fix"]
 
 
 def test_upsert_knowledge_record_writes_and_is_idempotent(tmp_path: Path) -> None:
@@ -138,7 +147,6 @@ def test_upsert_knowledge_record_writes_and_is_idempotent(tmp_path: Path) -> Non
         scope=KnowledgeScope.PROJECT_SPECIFIC,
         evidence_turns=[1, 3],
         evidence_count=2,
-        evidence_spread=1.0,
         processed_chars=500,
         created_at=now,
         updated_at=now,
@@ -157,12 +165,6 @@ def test_upsert_knowledge_record_writes_and_is_idempotent(tmp_path: Path) -> Non
     assert records[0].scope == KnowledgeScope.PROJECT_SPECIFIC
 
 
-def test_evidence_spread_calculation_including_single_turn_boundary() -> None:
-    assert pipeline._evidence_spread([1, 3], total_turns=3) == 1.0
-    assert pipeline._evidence_spread([2], total_turns=3) == 0.0
-    assert pipeline._evidence_spread([1, 2], total_turns=1) == 0.0
-
-
 def test_pipeline_admission_and_persistence_with_fake_extractor(tmp_path: Path) -> None:
     write_jsonl(tmp_path / "session.jsonl", session_events())
 
@@ -176,22 +178,13 @@ def test_pipeline_admission_and_persistence_with_fake_extractor(tmp_path: Path) 
                     title="Admitted item",
                     insight="Use structured records when storing extracted transferable knowledge.",
                     applicability="Applies to extraction pipelines that write durable knowledge records.",
-                    evidence_turns=[1],
                     scope=KnowledgeScope.GLOBAL,
                 ),
                 KnowledgeItemInput(
                     title="Rejected local",
                     insight="This is a one-off decision tied to a specific file in this repository.",
                     applicability="Only useful in this current repository context.",
-                    evidence_turns=[1],
                     scope=KnowledgeScope.SESSION_SPECIFIC,
-                ),
-                KnowledgeItemInput(
-                    title="Rejected empty evidence",
-                    insight="This insight has no evidence turn references and should be rejected.",
-                    applicability="Applies to any admission rule requiring traceable support.",
-                    evidence_turns=[],
-                    scope=KnowledgeScope.GLOBAL,
                 ),
             ]
 
@@ -206,9 +199,9 @@ def test_pipeline_admission_and_persistence_with_fake_extractor(tmp_path: Path) 
 
     assert stats.discovered_sessions == 1
     assert stats.processed_sessions == 1
-    assert stats.extracted_count == 3
+    assert stats.extracted_count == 2
     assert stats.admitted_count == 1
-    assert stats.rejected_count == 2
+    assert stats.rejected_count == 1
     assert (tmp_path / "knowledge-processed-index.json").exists()
     index = ProcessedIndex.model_validate_json((tmp_path / "knowledge-processed-index.json").read_text())
     assert index.sessions["session-1"].status == ProcessedStatus.PROCESSED

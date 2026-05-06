@@ -14,7 +14,6 @@ class KnowledgeItemInput(BaseModel):
     title: str = Field(min_length=3)
     insight: str = Field(min_length=10)
     applicability: str = Field(min_length=10)
-    evidence_turns: list[int] = Field(default_factory=list)
     scope: KnowledgeScope
 
 

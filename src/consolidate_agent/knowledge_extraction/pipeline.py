@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -30,7 +29,6 @@ class _PendingSession:
     path: Path
     session: ProcessedSession
     normalized_hash: str
-    total_turns: int
 
 
 def run_knowledge_extraction(
@@ -60,44 +58,50 @@ def run_knowledge_extraction(
     processed_index = read_processed_index(processed_index_path)
     engineer = SessionContextEngineer(sessions_dir=input_dir)
     pending: list[_PendingSession] = []
-
-    _progress(f"knowledge preprocess_sessions start sessions={len(paths)}")
-    for index, path in enumerate(paths, start=1):
-        _progress(f"knowledge preprocess_sessions session={index}/{len(paths)} path={path}")
-        session = engineer.process(path)
-        if session is None:
-            stats.skipped_sessions += 1
-            continue
-        normalized_hash = str(session.stats.processed_chars)
-        existing = processed_index.sessions.get(session.session_id)
-        if session.is_sub_agent or session.stats.processed_chars < 200 or session.stats.processed_chars > max_session_chars:
-            stats.skipped_sessions += 1
-            continue
-        if existing and existing.status == ProcessedStatus.PROCESSED and existing.normalized_hash == normalized_hash:
-            stats.skipped_sessions += 1
-            continue
-
-        processed_index.sessions[session.session_id] = ProcessedSessionState(
-            session_id=session.session_id,
-            path=str(path),
-            normalized_hash=normalized_hash,
-            status=ProcessedStatus.PROCESSING,
-            chunk_count=1,
-            processed_at=None,
-            error=None,
-        )
-        pending.append(
-            _PendingSession(
-                path=path,
-                session=session,
-                normalized_hash=normalized_hash,
-                total_turns=_count_turns(session.xml),
-            )
-        )
-    _progress(f"knowledge preprocess_sessions done pending={len(pending)} skipped={stats.skipped_sessions}")
-
     store = KnowledgeStore(knowledge_db_path)
+
     try:
+        _progress(f"knowledge preprocess_sessions start sessions={len(paths)}")
+        for index, path in enumerate(paths, start=1):
+            _progress(f"knowledge preprocess_sessions session={index}/{len(paths)} path={path}")
+            session = engineer.process(path)
+            if session is None:
+                stats.skipped_sessions += 1
+                continue
+            normalized_hash = str(session.stats.processed_chars)
+            existing = processed_index.sessions.get(session.session_id)
+            has_action = "<bash>" in session.xml or "<file_edit>" in session.xml
+            if (
+                session.is_sub_agent
+                or not has_action
+                or session.stats.processed_chars < 200
+                or session.stats.processed_chars > max_session_chars
+            ):
+                stats.skipped_sessions += 1
+                continue
+            if existing and existing.status == ProcessedStatus.PROCESSED and existing.normalized_hash == normalized_hash:
+                stats.skipped_sessions += 1
+                continue
+
+            store.save_processed_session(session.session_id, session.xml, session.stats.processed_chars)
+            processed_index.sessions[session.session_id] = ProcessedSessionState(
+                session_id=session.session_id,
+                path=str(path),
+                normalized_hash=normalized_hash,
+                status=ProcessedStatus.PROCESSING,
+                chunk_count=1,
+                processed_at=None,
+                error=None,
+            )
+            pending.append(
+                _PendingSession(
+                    path=path,
+                    session=session,
+                    normalized_hash=normalized_hash,
+                )
+            )
+        _progress(f"knowledge preprocess_sessions done pending={len(pending)} skipped={stats.skipped_sessions}")
+
         extractor = extractor or KnowledgeExtractor(settings)
         _progress(f"knowledge extract_sessions start sessions={len(pending)}")
 
@@ -131,11 +135,7 @@ def run_knowledge_extraction(
                 stats.admitted_count += len(admitted)
                 stats.rejected_count += len(rejected)
                 for item in admitted:
-                    record = _record_from_item(
-                        pending_session.session,
-                        item,
-                        total_turns=pending_session.total_turns,
-                    )
+                    record = _record_from_item(pending_session.session, item)
                     store.upsert_knowledge_record(record)
 
                 session_state = processed_index.sessions[session_id]
@@ -159,16 +159,15 @@ def _admit_items(items: list[KnowledgeItemInput]) -> tuple[list[KnowledgeItemInp
     admitted: list[KnowledgeItemInput] = []
     rejected: list[KnowledgeItemInput] = []
     for item in items:
-        if item.scope == KnowledgeScope.SESSION_SPECIFIC or not item.evidence_turns:
+        if item.scope == KnowledgeScope.SESSION_SPECIFIC:
             rejected.append(item)
         else:
             admitted.append(item)
     return admitted, rejected
 
 
-def _record_from_item(session: ProcessedSession, item: KnowledgeItemInput, total_turns: int) -> KnowledgeRecord:
+def _record_from_item(session: ProcessedSession, item: KnowledgeItemInput) -> KnowledgeRecord:
     now = utc_now()
-    evidence_turns = sorted(set(item.evidence_turns))
     return KnowledgeRecord(
         id=_record_id(session.session_id, item.title),
         session_id=session.session_id,
@@ -176,9 +175,8 @@ def _record_from_item(session: ProcessedSession, item: KnowledgeItemInput, total
         insight=item.insight,
         applicability=item.applicability,
         scope=item.scope,
-        evidence_turns=evidence_turns,
-        evidence_count=len(evidence_turns),
-        evidence_spread=_evidence_spread(evidence_turns, total_turns),
+        evidence_turns=[],
+        evidence_count=0,
         processed_chars=session.stats.processed_chars,
         created_at=now,
         updated_at=now,
@@ -188,19 +186,6 @@ def _record_from_item(session: ProcessedSession, item: KnowledgeItemInput, total
 def _record_id(session_id: str, title: str) -> str:
     digest = hashlib.sha1(f"{session_id}:{title}".encode("utf-8")).hexdigest()[:12]
     return f"knowledge_{digest}"
-
-
-def _evidence_spread(evidence_turns: list[int], total_turns: int) -> float:
-    if total_turns <= 1 or len(evidence_turns) < 2:
-        return 0.0
-    return (max(evidence_turns) - min(evidence_turns)) / (total_turns - 1)
-
-
-def _count_turns(xml: str) -> int:
-    turn_count = len(re.findall(r"<turn(?:\s|>)", xml))
-    if turn_count:
-        return turn_count
-    return len(re.findall(r"<user(?:\s|>)", xml))
 
 
 def _mark_failed(processed_index: ProcessedIndex, session_id: str, exc: Exception) -> None:

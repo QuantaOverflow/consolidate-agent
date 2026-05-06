@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib import request
 
 import numpy as np
@@ -12,6 +12,9 @@ from langchain_core.vectorstores import VectorStore
 from consolidate_agent.config import Settings
 from consolidate_agent.knowledge.store import KnowledgeStore
 from consolidate_agent.types import CanonicalKnowledge, KnowledgeRecord, MechanismTag
+
+if TYPE_CHECKING:
+    from langchain_community.embeddings import DashScopeEmbeddings
 
 SIMILARITY_THRESHOLD = 0.3
 KNOWLEDGE_RELATEDNESS_THRESHOLD = 0.7
@@ -195,6 +198,40 @@ def find_related_knowledge(
             "insight": record.insight,
             "applicability": record.applicability,
             "scope": record.scope.value,
+            "similarity_score": score,
+        }
+        for score, record in scored[:top_k]
+    ]
+
+
+def search_knowledge(
+    store: KnowledgeStore,
+    embeddings: DashScopeEmbeddings,
+    query_text: str,
+    top_k: int = 5,
+    threshold: float = 0.0,
+) -> list[dict]:
+    query_embedding = embeddings.embed_query(query_text)
+    records = store.list_all_knowledge_records()
+    if not records:
+        return []
+
+    record_map = {r.id: r for r in records}
+    all_embeddings = store.load_all_knowledge_embeddings()
+
+    scored = []
+    for record_id, embedding in all_embeddings.items():
+        record = record_map.get(record_id)
+        if record is None:
+            continue
+        score = _cosine_similarity(query_embedding, embedding)
+        if score >= threshold:
+            scored.append((score, record))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [
+        {
+            "record": record,
             "similarity_score": score,
         }
         for score, record in scored[:top_k]
