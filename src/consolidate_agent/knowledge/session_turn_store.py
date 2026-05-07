@@ -100,6 +100,25 @@ class SessionTurnStore:
                 return match.group(2).strip()
         return None
 
+    @staticmethod
+    def search_text(session_xml: str, pattern: str, snippet_chars: int = 50) -> list[dict]:
+        """Search all session turns by keyword/regex and return turn indexes with context snippets."""
+        try:
+            compiled = re.compile(pattern, re.IGNORECASE)
+        except re.error:
+            compiled = re.compile(re.escape(pattern), re.IGNORECASE)
+        results = []
+        for match in TURN_PATTERN.finditer(session_xml):
+            turn_index = int(match.group(1))
+            content = match.group(2)
+            m = compiled.search(content)
+            if m:
+                start = max(0, m.start() - snippet_chars // 2)
+                end = min(len(content), m.end() + snippet_chars // 2)
+                snippet = content[start:end].replace("\n", " ").strip()
+                results.append({"turn_index": turn_index, "snippet": snippet})
+        return results
+
     def is_session_embedded(self, session_id: str) -> bool:
         results = self._chroma.get(where={"session_id": session_id}, limit=1)
         return len(results["ids"]) > 0

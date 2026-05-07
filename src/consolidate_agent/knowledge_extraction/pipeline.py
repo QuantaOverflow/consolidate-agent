@@ -40,6 +40,8 @@ def run_knowledge_extraction(
     sample_limit: int | None = None,
     max_session_chars: int = 100_000,
     extractor: KnowledgeExtractor | None = None,
+    evidence_agent: "EvidenceAgent | None" = None,
+    session_xmls: "dict[str, str] | None" = None,
 ) -> KnowledgeExtractionStats:
     stats = KnowledgeExtractionStats()
     input_dir = input_dir.expanduser()
@@ -79,11 +81,12 @@ def run_knowledge_extraction(
             ):
                 stats.skipped_sessions += 1
                 continue
+
+            store.save_processed_session(session.session_id, session.xml, session.stats.processed_chars)
+
             if existing and existing.status == ProcessedStatus.PROCESSED and existing.normalized_hash == normalized_hash:
                 stats.skipped_sessions += 1
                 continue
-
-            store.save_processed_session(session.session_id, session.xml, session.stats.processed_chars)
             processed_index.sessions[session.session_id] = ProcessedSessionState(
                 session_id=session.session_id,
                 path=str(path),
@@ -104,6 +107,8 @@ def run_knowledge_extraction(
 
         extractor = extractor or KnowledgeExtractor(settings)
         _progress(f"knowledge extract_sessions start sessions={len(pending)}")
+        all_admitted: list[KnowledgeRecord] = []
+        session_xmls_for_evidence: dict[str, str] = dict(session_xmls or {})
 
         def extract_session(pending_session: _PendingSession) -> tuple[_PendingSession, list[KnowledgeItemInput]]:
             _progress(
@@ -136,13 +141,30 @@ def run_knowledge_extraction(
                 stats.rejected_count += len(rejected)
                 for item in admitted:
                     record = _record_from_item(pending_session.session, item)
-                    store.upsert_knowledge_record(record)
+                    all_admitted.append(record)
+                if admitted:
+                    session_xmls_for_evidence[session_id] = pending_session.session.xml
 
                 session_state = processed_index.sessions[session_id]
                 session_state.status = ProcessedStatus.PROCESSED
                 session_state.processed_at = utc_now()
                 session_state.error = None
                 stats.processed_sessions += 1
+
+        if evidence_agent is not None:
+            _progress(f"evidence_agent start records={len(all_admitted)}")
+            verified = evidence_agent.verify_batch(all_admitted, session_xmls_for_evidence)
+            admitted_count = sum(1 for r in verified if r.evidence_count > 0)
+            rejected_count = len(verified) - admitted_count
+            stats.evidence_admitted_count = admitted_count
+            stats.evidence_rejected_count = rejected_count
+            _progress(f"evidence_agent done admitted={admitted_count} rejected={rejected_count}")
+            records_to_write = verified
+        else:
+            records_to_write = all_admitted
+
+        for record in records_to_write:
+            store.upsert_knowledge_record(record)
         _progress(
             f"knowledge extract_sessions done processed={stats.processed_sessions} failed={stats.failed_sessions} "
             f"extracted={stats.extracted_count} admitted={stats.admitted_count} rejected={stats.rejected_count}"

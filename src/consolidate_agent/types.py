@@ -274,6 +274,8 @@ class KnowledgeExtractionStats(BaseModel):
     extracted_count: int = 0
     admitted_count: int = 0
     rejected_count: int = 0
+    evidence_admitted_count: int = 0
+    evidence_rejected_count: int = 0
 
 
 class ExtractionOutput(BaseModel):

@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=100_000,
         help="Max processed chars per session for knowledge extraction",
     )
+    parser.add_argument("--run-evidence-agent", action="store_true", help="Run Evidence Agent to verify evidence_turns after knowledge extraction")
     parser.add_argument("--run-consolidation", action="store_true", help="Run post-processing knowledge consolidation")
     parser.add_argument("--report", action="store_true", help="Print an observability report for the latest consolidation run")
     parser.add_argument("--embed", action="store_true", help="Build embedding indexes for pitfall and knowledge records")
@@ -95,7 +96,10 @@ def main() -> None:
             )
 
             def summarizer(turn_xml: str) -> str:
-                return (summarization_prompt | llm).invoke({"turn_xml": turn_xml}).content
+                try:
+                    return (summarization_prompt | llm).invoke({"turn_xml": turn_xml}).content
+                except Exception:
+                    return turn_xml[:500]
 
             def translator(query: str) -> str:
                 return (translation_prompt | llm).invoke({"query": query}).content
@@ -157,6 +161,15 @@ def main() -> None:
         return
 
     if args.extract_knowledge:
+        evidence_agent = None
+        if args.run_evidence_agent:
+            from consolidate_agent.knowledge.evidence_agent import EvidenceAgent
+            session_turn_store = SessionTurnStore(
+                chroma_path=Path("outputs/chroma/session_turns"),
+                embeddings=create_dashscope_embeddings(settings),
+            )
+            evidence_agent = EvidenceAgent(settings, session_turn_store)
+
         stats = run_knowledge_extraction(
             input_dir=input_dir,
             output_dir=output_dir,
@@ -165,10 +178,13 @@ def main() -> None:
             settings=settings,
             sample_limit=args.sample_limit,
             max_session_chars=args.max_session_chars,
+            evidence_agent=evidence_agent,
         )
         print(f"Knowledge extracted: {stats.extracted_count}")
         print(f"Knowledge admitted: {stats.admitted_count}")
         print(f"Knowledge rejected: {stats.rejected_count}")
+        print(f"Evidence admitted: {stats.evidence_admitted_count}")
+        print(f"Evidence rejected: {stats.evidence_rejected_count}")
         print(f"Sessions processed: {stats.processed_sessions}")
         print(f"Sessions failed: {stats.failed_sessions}")
         return

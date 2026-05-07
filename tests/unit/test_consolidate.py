@@ -724,7 +724,7 @@ def test_llm_agent_tag_governor_decides_one_with_search_tool(monkeypatch) -> Non
             )
 
     class FakeLLM:
-        def with_structured_output(self, model):
+        def with_structured_output(self, model, **kwargs):
             assert model is TaxonomyGovernanceDecision
             return FakeStructuredModel()
 
@@ -957,7 +957,7 @@ def test_llm_agent_tag_governor_omits_empty_agent_messages_from_structured_call(
 
     class FakeStructuredModel:
         def invoke(self, prompt_value):
-            messages = prompt_value.to_messages()
+            messages = prompt_value.to_messages() if hasattr(prompt_value, "to_messages") else prompt_value
             assert all(str(message.content).strip() for message in messages)
             assert "Useful search conclusion." in str(prompt_value)
             return TaxonomyGovernanceDecision(
@@ -967,7 +967,7 @@ def test_llm_agent_tag_governor_omits_empty_agent_messages_from_structured_call(
             )
 
     class FakeLLM:
-        def with_structured_output(self, model):
+        def with_structured_output(self, model, **kwargs):
             assert model is TaxonomyGovernanceDecision
             return FakeStructuredModel()
 
@@ -1004,4 +1004,57 @@ def test_llm_agent_tag_governor_omits_empty_agent_messages_from_structured_call(
         proposal_name="structured_input_validation",
         decision="reject",
         decision_reason="The evidence is too narrow.",
+    )
+
+
+def test_llm_agent_tag_governor_soft_rejects_after_empty_structured_retries(monkeypatch) -> None:
+    class FakeVectorStore:
+        def similarity_search_canonicals(self, query, k=5):
+            return []
+
+    class FakeStructuredModel:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, messages):
+            from langchain_core.messages import AIMessage
+
+            self.calls += 1
+            return {
+                "raw": AIMessage(content="", additional_kwargs={"tool_calls": []}),
+                "parsed": None,
+                "parsing_error": None,
+            }
+
+    structured_model = FakeStructuredModel()
+
+    class FakeLLM:
+        def with_structured_output(self, model, **kwargs):
+            assert model is TaxonomyGovernanceDecision
+            return structured_model
+
+    class FakeAgent:
+        def invoke(self, payload):
+            from langchain_core.messages import AIMessage
+
+            return {"messages": payload["messages"] + [AIMessage(content="Evidence is too narrow.")]}
+
+    monkeypatch.setattr("consolidate_agent.consolidation.taxonomy._chat_model", lambda settings: FakeLLM())
+    monkeypatch.setattr("langgraph.prebuilt.create_react_agent", lambda llm, tools, **kwargs: FakeAgent())
+
+    proposal = TagProposalDraft(
+        name="non_idempotent_execution_path",
+        definition="Execution logic that produces different outcomes on retry.",
+        supporting_canonical_ids=["canonical_1"],
+        difference_from_existing="No active tag covers this mechanism.",
+    )
+    governor = LLMAgentTagGovernor(Settings(DASHSCOPE_API_KEY="dummy"), FakeVectorStore())
+
+    decision = governor._decide_one(proposal, [])
+
+    assert structured_model.calls == 3
+    assert decision == TaxonomyGovernanceDecision(
+        proposal_name="non_idempotent_execution_path",
+        decision="reject",
+        decision_reason="Structured governance decision failed after 3 attempts; proposal rejected to keep consolidation running.",
     )

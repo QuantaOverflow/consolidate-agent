@@ -268,7 +268,7 @@ class LLMAgentTagGovernor:
         self.recorder = recorder or NullAgentInvocationRecorder()
         self.run_id = run_id
 
-        self._structured_model = self.llm.with_structured_output(TaxonomyGovernanceDecision)
+        self._structured_model = self.llm.with_structured_output(TaxonomyGovernanceDecision, include_raw=True)
 
     def govern(
         self,
@@ -340,27 +340,39 @@ Summarize your reasoning and final decision (accept, merge, or reject)."""
         ], template_format="jinja2")
         from langchain_core.messages import HumanMessage as _HumanMessage
         prompt_value = extract_prompt.invoke({})
-        decision = self._structured_model.invoke(prompt_value)
+        base_messages = prompt_value.to_messages()
+        messages = base_messages
+        decision = None
+        for attempt in range(3):
+            raw_result = self._structured_model.invoke(messages)
+            decision = raw_result.get("parsed") if isinstance(raw_result, dict) else raw_result
+            if decision is not None:
+                break
+            raw_content = ""
+            if isinstance(raw_result, dict) and raw_result.get("raw"):
+                raw_content = getattr(raw_result["raw"], "content", "") or ""
+            parsing_error = ""
+            if isinstance(raw_result, dict) and raw_result.get("parsing_error"):
+                parsing_error = str(raw_result["parsing_error"])
+            messages = base_messages + [
+                _HumanMessage(content=(
+                    f"Your previous response (attempt {attempt + 1}/3) did not produce valid structured output.\n"
+                    + (f"Your output was:\n{raw_content}\n\n" if raw_content else "")
+                    + (f"Parse error: {parsing_error}\n\n" if parsing_error else "")
+                    + f"You MUST return a JSON object with: "
+                    f"proposal_name exactly \"{proposal.name}\", "
+                    f"decision as one of: accept, merge, reject. "
+                    f"For 'accept': include accepted_tag (name, definition, positive_examples, negative_examples). "
+                    f"For 'merge': set target_tag_name to an existing active tag name. "
+                    f"For 'reject': no extra fields needed."
+                ))
+            ]
         if decision is None:
-            base_messages = prompt_value.to_messages()
-            for attempt in range(2):
-                retry_messages = base_messages + [
-                    _HumanMessage(content=(
-                        "Your previous response did not produce a valid structured output. "
-                        f"You MUST return a JSON object with: "
-                        f"proposal_name exactly \"{proposal.name}\", "
-                        f"decision as one of: accept, merge, reject. "
-                        f"For 'accept': include accepted_tag (name, definition, positive_examples, negative_examples). "
-                        f"For 'merge': set target_tag_name to an existing active tag name. "
-                        f"For 'reject': no extra fields needed. "
-                        f"Attempt {attempt + 2}/3."
-                    ))
-                ]
-                decision = self._structured_model.invoke(retry_messages)
-                if decision is not None:
-                    break
-        if decision is None:
-            raise ValueError(f"LLMAgentTagGovernor failed to extract structured decision for proposal '{proposal.name}'")
+            decision = TaxonomyGovernanceDecision(
+                proposal_name=proposal.name,
+                decision="reject",
+                decision_reason="Structured governance decision failed after 3 attempts; proposal rejected to keep consolidation running.",
+            )
         decision.proposal_name = proposal.name
         return decision
 

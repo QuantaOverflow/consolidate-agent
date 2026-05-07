@@ -536,9 +536,9 @@ class KnowledgeStore:
             """
             INSERT INTO source_knowledge_records (
                 record_id, session_id, title, insight, applicability, scope,
-                evidence_turns_json, evidence_count,
+                evidence_turns_json, evidence_count, evidence_spread,
                 processed_chars, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(record_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 title = excluded.title,
@@ -559,6 +559,7 @@ class KnowledgeStore:
                 record.scope.value,
                 json.dumps(record.evidence_turns, ensure_ascii=False),
                 record.evidence_count,
+                0.0,
                 record.processed_chars,
                 record.created_at.isoformat(),
                 record.updated_at.isoformat(),
