@@ -45,6 +45,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Number of session-level Evidence Agent workers",
     )
+    parser.add_argument(
+        "--evidence-failure-trace-path",
+        help="Evidence Agent structured-output failure/recovery trace JSONL path",
+    )
+    parser.add_argument(
+        "--evidence-reject-trace-path",
+        help="Evidence Agent judge reject trace JSONL path",
+    )
     parser.add_argument("--run-consolidation", action="store_true", help="Run post-processing knowledge consolidation")
     parser.add_argument("--report", action="store_true", help="Print an observability report for the latest consolidation run")
     parser.add_argument("--embed", action="store_true", help="Build embedding indexes for pitfall and knowledge records")
@@ -174,7 +182,17 @@ def main() -> None:
                 chroma_path=Path("outputs/chroma/session_turns"),
                 embeddings=create_dashscope_embeddings(settings),
             )
-            evidence_agent = EvidenceAgent(settings, session_turn_store, workers=args.evidence_workers)
+            evidence_agent_kwargs = {}
+            if args.evidence_failure_trace_path:
+                evidence_agent_kwargs["failure_trace_path"] = Path(args.evidence_failure_trace_path).expanduser()
+            if args.evidence_reject_trace_path:
+                evidence_agent_kwargs["reject_trace_path"] = Path(args.evidence_reject_trace_path).expanduser()
+            evidence_agent = EvidenceAgent(
+                settings,
+                session_turn_store,
+                workers=args.evidence_workers,
+                **evidence_agent_kwargs,
+            )
 
         stats = run_knowledge_extraction(
             input_dir=input_dir,

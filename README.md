@@ -58,7 +58,9 @@ uv run python -m consolidate_agent \
   --run-evidence-agent \
   --evidence-workers 10 \
   --knowledge-processed-index-path ./outputs/knowledge-processed-index.json \
-  --knowledge-db-path ./outputs/knowledge.db
+  --knowledge-db-path ./outputs/knowledge.db \
+  --evidence-failure-trace-path ./outputs/evidence-agent-failures.jsonl \
+  --evidence-reject-trace-path ./outputs/evidence-agent-rejects.jsonl
 ```
 
 Build reusable turn embeddings before large Evidence Agent runs:
