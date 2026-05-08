@@ -69,11 +69,12 @@ uv run python -m consolidate_agent \
   --embed-turns
 ```
 
-Evidence Agent uses existing turn embeddings for semantic search and verifies
-records with session-level workers. Records from the same session share parsed
-turns and text-search cache. A record is admitted only when the judge returns
-`admit` with at least one concrete `evidence_turn`; empty-evidence admits remain
-soft rejected with `evidence_count=0`.
+Evidence Agent uses turn embeddings for semantic search, fills in missing
+session turn embeddings before verification, and verifies records with
+session-level workers. Records from the same session share parsed turns and
+text-search cache. A record is admitted only when the judge returns `admit` with
+at least one concrete `evidence_turn`; empty-evidence admits remain soft
+rejected with `evidence_count=0`.
 
 Run pitfall extraction plus consolidation:
 

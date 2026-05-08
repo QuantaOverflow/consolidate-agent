@@ -215,6 +215,110 @@ def test_pipeline_admission_and_persistence_with_fake_extractor(tmp_path: Path) 
     assert records[0].title == "Admitted item"
 
 
+def test_pipeline_record_ids_include_source_path_for_duplicate_session_ids(tmp_path: Path) -> None:
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    write_jsonl(tmp_path / "session-a.jsonl", session_events(session_id="duplicate-session", body="a" * 260))
+    write_jsonl(nested / "session-b.jsonl", session_events(session_id="duplicate-session", body="b" * 260))
+
+    class FakeExtractor(KnowledgeExtractor):
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        def extract(self, session: ProcessedSession) -> list[KnowledgeItemInput]:
+            return [
+                KnowledgeItemInput(
+                    title="Same title",
+                    insight=f"Same title should not collide across source files. {session.stats.processed_chars}",
+                    applicability="Applies when multiple rollout files share a session id.",
+                    scope=KnowledgeScope.GLOBAL,
+                )
+            ]
+
+    stats = pipeline.run_knowledge_extraction(
+        input_dir=tmp_path,
+        output_dir=tmp_path / "out",
+        processed_index_path=tmp_path / "knowledge-processed-index.json",
+        knowledge_db_path=tmp_path / "knowledge.db",
+        settings=Settings(dashscope_api_key="test"),
+        extractor=FakeExtractor(Settings(dashscope_api_key="test")),
+    )
+
+    store = KnowledgeStore(tmp_path / "knowledge.db")
+    try:
+        records = store.list_all_knowledge_records()
+    finally:
+        store.close()
+
+    assert stats.extracted_count == 2
+    assert stats.admitted_count == 2
+    assert len(records) == 2
+    assert len({record.id for record in records}) == 2
+    assert {record.session_id for record in records} == {"duplicate-session"}
+
+
+def test_pipeline_embeds_missing_turns_before_evidence_verification(tmp_path: Path) -> None:
+    write_jsonl(tmp_path / "session.jsonl", session_events())
+
+    class FakeExtractor(KnowledgeExtractor):
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        def extract(self, session: ProcessedSession) -> list[KnowledgeItemInput]:
+            return [
+                KnowledgeItemInput(
+                    title="Needs evidence",
+                    insight="Evidence verification should have turn embeddings available.",
+                    applicability="Applies when running evidence verification after extraction.",
+                    scope=KnowledgeScope.GLOBAL,
+                )
+            ]
+
+    class FakeEvidenceAgent:
+        def __init__(self) -> None:
+            self.embedded: set[str] = set()
+            self.embed_calls: list[dict[str, str]] = []
+
+        def embedded_session_ids(self) -> set[str]:
+            return set(self.embedded)
+
+        def embed_missing_sessions(
+            self,
+            session_xmls: dict[str, str],
+            embedded_session_ids: set[str] | None = None,
+        ) -> int:
+            missing = set(session_xmls) - set(embedded_session_ids or set())
+            self.embed_calls.append({session_id: session_xmls[session_id] for session_id in sorted(missing)})
+            self.embedded.update(missing)
+            return len(missing)
+
+        def verify_batch(
+            self,
+            records: list[KnowledgeRecord],
+            session_xmls: dict[str, str],
+        ) -> list[KnowledgeRecord]:
+            assert self.embedded == set(session_xmls)
+            return [
+                record.model_copy(update={"evidence_turns": [1], "evidence_count": 1})
+                for record in records
+            ]
+
+    evidence_agent = FakeEvidenceAgent()
+    stats = pipeline.run_knowledge_extraction(
+        input_dir=tmp_path,
+        output_dir=tmp_path / "out",
+        processed_index_path=tmp_path / "knowledge-processed-index.json",
+        knowledge_db_path=tmp_path / "knowledge.db",
+        settings=Settings(dashscope_api_key="test"),
+        extractor=FakeExtractor(Settings(dashscope_api_key="test")),
+        evidence_agent=evidence_agent,
+    )
+
+    assert stats.evidence_admitted_count == 1
+    assert len(evidence_agent.embed_calls) == 1
+    assert set(evidence_agent.embed_calls[0]) == {"session-1"}
+
+
 def test_max_session_chars_filter_skips_before_extraction(tmp_path: Path) -> None:
     write_jsonl(tmp_path / "session.jsonl", session_events(body="x" * 800))
 

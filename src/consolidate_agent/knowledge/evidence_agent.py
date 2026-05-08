@@ -337,6 +337,14 @@ class EvidenceAgent:
     def embedded_session_ids(self) -> set[str]:
         return self._turn_store.embedded_session_ids()
 
+    def embed_missing_sessions(self, session_xmls: dict[str, str], embedded_session_ids: set[str] | None = None) -> int:
+        embedded = embedded_session_ids if embedded_session_ids is not None else self.embedded_session_ids()
+        missing_session_ids = sorted(set(session_xmls) - embedded)
+        added_turns = 0
+        for session_id in missing_session_ids:
+            added_turns += self._turn_store.embed_session(session_id, session_xmls[session_id])
+        return added_turns
+
     def _verify_with_context(self, record: KnowledgeRecord, context: _SessionEvidenceContext) -> KnowledgeRecord:
         try:
             plan = self._plan(record)

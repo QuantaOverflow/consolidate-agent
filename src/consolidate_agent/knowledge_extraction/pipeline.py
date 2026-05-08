@@ -27,6 +27,7 @@ MAX_CONCURRENT_SESSIONS = 5
 @dataclass(frozen=True)
 class _PendingSession:
     path: Path
+    source_key: str
     session: ProcessedSession
     normalized_hash: str
 
@@ -95,6 +96,7 @@ def run_knowledge_extraction(
             pending.append(
                 _PendingSession(
                     path=path,
+                    source_key=_source_key(input_dir, path),
                     session=session,
                     normalized_hash=normalized_hash,
                 )
@@ -139,7 +141,7 @@ def run_knowledge_extraction(
                 stats.admitted_count += len(admitted)
                 stats.rejected_count += len(rejected)
                 for item in admitted:
-                    record = _record_from_item(pending_session.session, item)
+                    record = _record_from_item(pending_session.session, pending_session.source_key, item)
                     all_admitted.append(record)
                 if admitted:
                     session_xmls_for_evidence[session_id] = pending_session.session.xml
@@ -156,9 +158,22 @@ def run_knowledge_extraction(
             missing_embedding_sessions = set(session_xmls_for_evidence) - embedded_session_ids
             if missing_embedding_sessions:
                 _progress(
-                    f"evidence_agent warning missing_turn_embeddings={len(missing_embedding_sessions)} "
-                    "run --embed-turns before large evidence runs to enable semantic search"
+                    f"evidence_agent embed_missing_sessions start sessions={len(missing_embedding_sessions)}"
                 )
+                added_turns = evidence_agent.embed_missing_sessions(
+                    session_xmls_for_evidence,
+                    embedded_session_ids=embedded_session_ids,
+                )
+                unresolved = set(session_xmls_for_evidence) - evidence_agent.embedded_session_ids()
+                _progress(
+                    f"evidence_agent embed_missing_sessions done sessions={len(missing_embedding_sessions)} "
+                    f"turn_chunks={added_turns} unresolved={len(unresolved)}"
+                )
+                if unresolved:
+                    _progress(
+                        f"evidence_agent warning missing_turn_embeddings={len(unresolved)} "
+                        "semantic search may be weaker for these sessions"
+                    )
             verified = evidence_agent.verify_batch(all_admitted, session_xmls_for_evidence)
             admitted_count = sum(1 for r in verified if r.evidence_count > 0)
             rejected_count = len(verified) - admitted_count
@@ -217,10 +232,10 @@ def _format_skip_reasons(skip_reasons: dict[str, int]) -> str:
     return json.dumps(dict(sorted(skip_reasons.items())), ensure_ascii=False, sort_keys=True)
 
 
-def _record_from_item(session: ProcessedSession, item: KnowledgeItemInput) -> KnowledgeRecord:
+def _record_from_item(session: ProcessedSession, source_key: str, item: KnowledgeItemInput) -> KnowledgeRecord:
     now = utc_now()
     return KnowledgeRecord(
-        id=_record_id(session.session_id, item.title),
+        id=_record_id(session.session_id, source_key, item.title),
         session_id=session.session_id,
         title=item.title,
         insight=item.insight,
@@ -234,8 +249,15 @@ def _record_from_item(session: ProcessedSession, item: KnowledgeItemInput) -> Kn
     )
 
 
-def _record_id(session_id: str, title: str) -> str:
-    digest = hashlib.sha1(f"{session_id}:{title}".encode("utf-8")).hexdigest()[:12]
+def _source_key(input_dir: Path, path: Path) -> str:
+    try:
+        return path.relative_to(input_dir).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _record_id(session_id: str, source_key: str, title: str) -> str:
+    digest = hashlib.sha1(f"{session_id}:{source_key}:{title}".encode("utf-8")).hexdigest()[:12]
     return f"knowledge_{digest}"
 
 
