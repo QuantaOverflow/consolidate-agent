@@ -11,9 +11,12 @@ from langchain_qwq import ChatQwen
 from consolidate_agent.consolidation.pipeline import run_consolidation
 from consolidate_agent.config import Settings
 from consolidate_agent.extraction.pipeline import ConsolidationGraph
+from consolidate_agent.knowledge.consolidation import run_knowledge_consolidation
+from consolidate_agent.knowledge.obsidian_export import export_to_obsidian
 from consolidate_agent.knowledge_extraction.pipeline import run_knowledge_extraction
 from consolidate_agent.knowledge.session_turn_store import SessionTurnStore
 from consolidate_agent.knowledge.store import KnowledgeStore
+from consolidate_agent.knowledge.tag_extractor import KnowledgeTagExtractor
 from consolidate_agent.knowledge.vector import KnowledgeVectorStore, create_dashscope_embeddings, search_knowledge
 from consolidate_agent.prompt_loader import load_prompt
 from consolidate_agent.types import PipelineState
@@ -54,8 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Evidence Agent judge reject trace JSONL path",
     )
     parser.add_argument("--run-consolidation", action="store_true", help="Run post-processing knowledge consolidation")
+    parser.add_argument("--run-knowledge-consolidation", action="store_true", help="Run knowledge record tag consolidation")
     parser.add_argument("--report", action="store_true", help="Print an observability report for the latest consolidation run")
     parser.add_argument("--embed", action="store_true", help="Build embedding indexes for pitfall and knowledge records")
+    parser.add_argument("--extract-tags", action="store_true", help="Extract tags for admitted knowledge records")
+    parser.add_argument("--dedup-tags", action="store_true", help="Deduplicate and merge semantically overlapping knowledge tags")
+    parser.add_argument("--export-obsidian", help="Export admitted knowledge records as Obsidian Markdown notes")
     parser.add_argument("--embed-turns", action="store_true", help="Build embedding index for processed session turns")
     parser.add_argument("--query", help="Search embedded knowledge records by text")
     parser.add_argument("--top-k", type=int, default=5, help="Number of knowledge search results to return")
@@ -67,11 +74,35 @@ def main() -> None:
     if args.embed and args.extract_knowledge:
         print("Error: --embed and --extract-knowledge are mutually exclusive")
         sys.exit(1)
-    if args.query is not None and (args.embed or args.extract_knowledge or args.run_consolidation):
-        print("Error: --query is mutually exclusive with --embed, --extract-knowledge, and --run-consolidation")
+    exclusive_modes = [
+        args.embed,
+        args.extract_knowledge,
+        args.run_consolidation,
+        args.run_knowledge_consolidation,
+        args.extract_tags,
+        args.dedup_tags,
+        args.export_obsidian is not None,
+    ]
+    if sum(1 for enabled in exclusive_modes if enabled) > 1:
+        print("Error: --embed, --extract-knowledge, --run-consolidation, --run-knowledge-consolidation, --extract-tags, --dedup-tags, and --export-obsidian are mutually exclusive")
         sys.exit(1)
-    if args.embed_turns and (args.embed or args.extract_knowledge or args.run_consolidation or args.report or args.query is not None):
-        print("Error: --embed-turns is mutually exclusive with --embed, --extract-knowledge, --run-consolidation, --report, and --query")
+    if args.query is not None and (args.embed or args.extract_knowledge or args.run_consolidation or args.run_knowledge_consolidation):
+        print("Error: --query is mutually exclusive with --embed, --extract-knowledge, --run-consolidation, and --run-knowledge-consolidation")
+        sys.exit(1)
+    if args.query is not None and (args.extract_tags or args.export_obsidian is not None):
+        print("Error: --query is mutually exclusive with --extract-tags and --export-obsidian")
+        sys.exit(1)
+    if args.embed_turns and (
+        args.embed
+        or args.extract_knowledge
+        or args.run_consolidation
+        or args.run_knowledge_consolidation
+        or args.report
+        or args.query is not None
+        or args.extract_tags
+        or args.export_obsidian is not None
+    ):
+        print("Error: --embed-turns is mutually exclusive with --embed, --extract-knowledge, --run-consolidation, --run-knowledge-consolidation, --report, --query, --extract-tags, and --export-obsidian")
         sys.exit(1)
 
     settings = Settings()
@@ -170,6 +201,69 @@ def main() -> None:
             vector_store.embed_knowledge_records(knowledge_records)
             print(f"Embedded canonicals: {missing_canonicals}")
             print(f"Embedded knowledge records: {missing_knowledge_records}")
+        finally:
+            store.close()
+        return
+
+    if args.extract_tags:
+        store = KnowledgeStore(knowledge_db_path)
+        try:
+            records = store.list_admitted_knowledge_records()
+            tags_map = KnowledgeTagExtractor(settings).extract_tags_batch(records)
+            for record_id, tags in tags_map.items():
+                store.save_knowledge_tags(record_id, tags)
+            print(f"Extracted tags for {len(records)} records")
+        finally:
+            store.close()
+        return
+
+    if args.dedup_tags:
+        from consolidate_agent.knowledge.tag_extractor import deduplicate_tags
+        store = KnowledgeStore(knowledge_db_path)
+        try:
+            all_tags_by_record = store.load_all_knowledge_tags()
+            unique_tags = sorted({t for tags in all_tags_by_record.values() for t in tags})
+            print(f"Deduplicating {len(unique_tags)} unique tags across {len(all_tags_by_record)} records...")
+            merge_map = deduplicate_tags(unique_tags, settings)
+            updated = store.apply_tag_merge_map(merge_map)
+            print(f"Merged {len(merge_map)} tags, updated {updated} records")
+        finally:
+            store.close()
+        return
+
+    if args.export_obsidian is not None:
+        obsidian_output_dir = Path(args.export_obsidian).expanduser()
+        store = KnowledgeStore(knowledge_db_path)
+        try:
+            all_records = store.list_admitted_knowledge_records()
+            assignments_map = {
+                record.id: [tag_name for tag_name, _ in store.list_knowledge_tag_assignments(record.id)]
+                for record in all_records
+            }
+            # only export records with tag assignments (skip no_tag / pending)
+            assigned_records = [r for r in all_records if assignments_map.get(r.id)]
+            tags_map = {record.id: store.load_knowledge_tags(record.id) for record in assigned_records}
+            exported_count = export_to_obsidian(
+                assigned_records,
+                tags_map,
+                obsidian_output_dir,
+                assignments_map=assignments_map,
+            )
+            skipped = len(all_records) - len(assigned_records)
+            print(f"Exported {exported_count} notes to {obsidian_output_dir} (skipped {skipped} no-tag records)")
+        finally:
+            store.close()
+        return
+
+    if args.run_knowledge_consolidation:
+        store = KnowledgeStore(knowledge_db_path)
+        try:
+            vector_store = KnowledgeVectorStore(store, create_dashscope_embeddings(settings))
+            # warm start: prioritise no_tag records; cold start: all admitted records
+            no_tag_records = store.list_no_tag_knowledge_records()
+            records = no_tag_records if no_tag_records else store.list_admitted_knowledge_records()
+            run_knowledge_consolidation(records, store, vector_store, settings)
+            print(f"Knowledge consolidation done: {len(records)} records (no_tag={len(no_tag_records)})")
         finally:
             store.close()
         return

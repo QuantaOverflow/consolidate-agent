@@ -340,6 +340,25 @@ class KnowledgeStore:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS knowledge_tags (
+                tag_id TEXT PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                definition TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                merged_into_tag_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS knowledge_tag_assignments (
+                record_id TEXT NOT NULL,
+                tag_id TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.8,
+                assignment_reason TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (record_id, tag_id)
+            );
+
             CREATE TABLE IF NOT EXISTS processed_sessions (
                 session_id TEXT PRIMARY KEY,
                 xml TEXT NOT NULL,
@@ -351,6 +370,8 @@ class KnowledgeStore:
         self._ensure_column("consolidation_failures", "run_id", "TEXT")
         self._ensure_column("canonical_knowledge", "embedding", "TEXT")
         self._ensure_column("source_knowledge_records", "embedding", "TEXT")
+        self._ensure_column("source_knowledge_records", "tags_json", "TEXT")
+        self._ensure_column("source_knowledge_records", "consolidation_status", "TEXT DEFAULT 'pending'")
         self._ensure_column("mechanism_tags", "embedding", "TEXT")
         self._ensure_column("rule_tag_assignments", "updated_at", "TEXT")
         self.connection.commit()
@@ -596,6 +617,206 @@ class KnowledgeStore:
             """
         ).fetchall()
         return [_knowledge_record_from_row(row) for row in rows]
+
+    def list_admitted_knowledge_records(self) -> list[KnowledgeRecord]:
+        return self.list_verified_knowledge_records()
+
+    def upsert_knowledge_tag(self, tag: KnowledgeTag) -> bool:
+        existing = self.connection.execute(
+            "SELECT tag_id FROM knowledge_tags WHERE tag_id = ? OR name = ?",
+            (tag.tag_id, tag.name),
+        ).fetchone()
+        with self._lock:
+            self.connection.execute(
+                """
+                INSERT INTO knowledge_tags (
+                    tag_id, name, definition, status, merged_into_tag_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tag_id) DO UPDATE SET
+                    name = excluded.name,
+                    definition = excluded.definition,
+                    status = excluded.status,
+                    merged_into_tag_id = excluded.merged_into_tag_id,
+                    updated_at = excluded.updated_at
+                ON CONFLICT(name) DO UPDATE SET
+                    definition = excluded.definition,
+                    status = excluded.status,
+                    merged_into_tag_id = excluded.merged_into_tag_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    tag.tag_id,
+                    tag.name,
+                    tag.definition,
+                    tag.status,
+                    tag.merged_into_tag_id,
+                    tag.created_at.isoformat(),
+                    tag.updated_at.isoformat(),
+                ),
+            )
+            self.connection.commit()
+        return existing is None
+
+    def list_active_knowledge_tags(self) -> list[KnowledgeTag]:
+        rows = self.connection.execute(
+            """
+            SELECT tag_id, name, definition, status, merged_into_tag_id, created_at, updated_at
+            FROM knowledge_tags
+            WHERE status = 'active'
+            ORDER BY name
+            """
+        ).fetchall()
+        return [_knowledge_tag_from_row(row) for row in rows]
+
+    def merge_knowledge_tag(self, keep_id: str, merge_id: str) -> None:
+        now = utc_now().isoformat()
+        with self._lock:
+            with self.connection:
+                self.connection.execute(
+                    """
+                    UPDATE knowledge_tags
+                    SET status = 'merged', merged_into_tag_id = ?, updated_at = ?
+                    WHERE tag_id = ?
+                    """,
+                    (keep_id, now, merge_id),
+                )
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO knowledge_tag_assignments (
+                        record_id, tag_id, confidence, assignment_reason, created_at
+                    )
+                    SELECT record_id, ?, confidence, assignment_reason, created_at
+                    FROM knowledge_tag_assignments
+                    WHERE tag_id = ?
+                    """,
+                    (keep_id, merge_id),
+                )
+                self.connection.execute(
+                    "DELETE FROM knowledge_tag_assignments WHERE tag_id = ?",
+                    (merge_id,),
+                )
+
+    def set_knowledge_consolidation_status(self, record_id: str, status: str) -> None:
+        """Set consolidation_status for a knowledge record: pending / assigned / no_tag."""
+        with self._lock:
+            self.connection.execute(
+                "UPDATE source_knowledge_records SET consolidation_status = ? WHERE record_id = ?",
+                (status, record_id),
+            )
+            self.connection.commit()
+
+    def list_no_tag_knowledge_records(self) -> list[KnowledgeRecord]:
+        """Return admitted records with consolidation_status = 'no_tag'."""
+        rows = self.connection.execute(
+            """
+            SELECT record_id, session_id, title, insight, applicability, scope,
+                   evidence_turns_json, evidence_count, processed_chars, created_at, updated_at
+            FROM source_knowledge_records
+            WHERE evidence_count > 0 AND consolidation_status = 'no_tag'
+            """
+        ).fetchall()
+        return [_knowledge_record_from_row(row) for row in rows]
+
+    def upsert_knowledge_tag_assignment(self, record_id: str, tag_id: str, reason: str) -> None:
+        now = utc_now().isoformat()
+        with self._lock:
+            self.connection.execute(
+                """
+                INSERT INTO knowledge_tag_assignments (
+                    record_id, tag_id, confidence, assignment_reason, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(record_id, tag_id) DO UPDATE SET
+                    confidence = excluded.confidence,
+                    assignment_reason = excluded.assignment_reason
+                """,
+                (record_id, tag_id, 0.8, reason, now),
+            )
+            self.connection.commit()
+
+    def list_knowledge_tag_assignments(self, record_id: str) -> list[tuple[str, str]]:
+        rows = self.connection.execute(
+            """
+            SELECT t.name, a.assignment_reason
+            FROM knowledge_tag_assignments a
+            JOIN knowledge_tags t ON t.tag_id = a.tag_id
+            WHERE a.record_id = ? AND t.status = 'active'
+            ORDER BY t.name
+            """,
+            (record_id,),
+        ).fetchall()
+        return [(str(row["name"]), str(row["assignment_reason"])) for row in rows]
+
+    def list_records_without_knowledge_tag(self) -> list[KnowledgeRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT r.record_id, r.session_id, r.title, r.insight, r.applicability, r.scope,
+                   r.evidence_turns_json, r.evidence_count,
+                   r.processed_chars, r.created_at, r.updated_at
+            FROM source_knowledge_records r
+            LEFT JOIN knowledge_tag_assignments a ON a.record_id = r.record_id
+            WHERE r.evidence_count > 0 AND a.record_id IS NULL
+            ORDER BY r.record_id
+            """
+        ).fetchall()
+        return [_knowledge_record_from_row(row) for row in rows]
+
+    def save_knowledge_tags(self, record_id: str, tags: list[str]) -> None:
+        with self._lock:
+            self.connection.execute(
+                """
+                UPDATE source_knowledge_records
+                SET tags_json = ?, updated_at = ?
+                WHERE record_id = ?
+                """,
+                (json.dumps(tags, ensure_ascii=False), utc_now().isoformat(), record_id),
+            )
+            self.connection.commit()
+
+    def load_all_knowledge_tags(self) -> dict[str, list[str]]:
+        """Return {record_id: tags} for all admitted records that have tags."""
+        with self._lock:
+            rows = self.connection.execute(
+                "SELECT record_id, tags_json FROM source_knowledge_records "
+                "WHERE evidence_count > 0 AND tags_json IS NOT NULL"
+            ).fetchall()
+        result = {}
+        for row in rows:
+            try:
+                tags = json.loads(row["tags_json"])
+                if isinstance(tags, list) and tags:
+                    result[row["record_id"]] = [str(t) for t in tags]
+            except json.JSONDecodeError:
+                pass
+        return result
+
+    def apply_tag_merge_map(self, merge_map: dict[str, str]) -> int:
+        """Apply a {old_tag: canonical_tag} merge map to all records. Returns updated record count."""
+        if not merge_map:
+            return 0
+        all_tags = self.load_all_knowledge_tags()
+        updated = 0
+        for record_id, tags in all_tags.items():
+            new_tags = list(dict.fromkeys(merge_map.get(t, t) for t in tags))
+            if new_tags != tags:
+                self.save_knowledge_tags(record_id, new_tags)
+                updated += 1
+        return updated
+
+    def load_knowledge_tags(self, record_id: str) -> list[str]:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT tags_json FROM source_knowledge_records WHERE record_id = ?",
+                (record_id,),
+            ).fetchone()
+        if row is None or row["tags_json"] is None:
+            return []
+        try:
+            tags = json.loads(row["tags_json"])
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(tags, list):
+            return []
+        return [str(tag) for tag in tags]
 
     def count_knowledge_records(self) -> int:
         row = self.connection.execute("SELECT COUNT(*) AS count FROM source_knowledge_records").fetchone()
@@ -1093,6 +1314,20 @@ def _tag_from_row(row: sqlite3.Row) -> MechanismTag:
         status=MechanismTagStatus(row["status"]),
         positive_examples=json.loads(row["positive_examples_json"]),
         negative_examples=json.loads(row["negative_examples_json"]),
+        merged_into_tag_id=row["merged_into_tag_id"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _knowledge_tag_from_row(row: sqlite3.Row):
+    from consolidate_agent.knowledge.consolidation import KnowledgeTag
+
+    return KnowledgeTag(
+        tag_id=row["tag_id"],
+        name=row["name"],
+        definition=row["definition"],
+        status=row["status"],
         merged_into_tag_id=row["merged_into_tag_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
