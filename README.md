@@ -50,6 +50,31 @@ uv run python -m consolidate_agent \
   --max-session-chars 100000
 ```
 
+Run generic session knowledge extraction with Evidence Agent verification:
+
+```bash
+uv run python -m consolidate_agent \
+  --extract-knowledge \
+  --run-evidence-agent \
+  --evidence-workers 10 \
+  --knowledge-processed-index-path ./outputs/knowledge-processed-index.json \
+  --knowledge-db-path ./outputs/knowledge.db
+```
+
+Build reusable turn embeddings before large Evidence Agent runs:
+
+```bash
+uv run python -m consolidate_agent \
+  --knowledge-db-path ./outputs/knowledge.db \
+  --embed-turns
+```
+
+Evidence Agent uses existing turn embeddings for semantic search and verifies
+records with session-level workers. Records from the same session share parsed
+turns and text-search cache. A record is admitted only when the judge returns
+`admit` with at least one concrete `evidence_turn`; empty-evidence admits remain
+soft rejected with `evidence_count=0`.
+
 Run pitfall extraction plus consolidation:
 
 ```bash
@@ -72,9 +97,9 @@ uv run python -m consolidate_agent \
 ```
 
 `--embed` is a manual indexing command. It embeds active rows in
-`canonical_knowledge` and rows in `source_knowledge_records`, skips records
-that already have embeddings, and prints how many records were missing
-embeddings before the run.
+`canonical_knowledge` and verified rows in `source_knowledge_records`
+(`evidence_count > 0`), skips records that already have embeddings, and prints
+how many verified records were missing embeddings before the run.
 
 ## Current Consolidation Mode
 

@@ -68,24 +68,20 @@ def run_knowledge_extraction(
             _progress(f"knowledge preprocess_sessions session={index}/{len(paths)} path={path}")
             session = engineer.process(path)
             if session is None:
-                stats.skipped_sessions += 1
+                _skip_session(stats, "unreadable_or_empty")
                 continue
             normalized_hash = str(session.stats.processed_chars)
             existing = processed_index.sessions.get(session.session_id)
             has_action = "<bash>" in session.xml or "<file_edit>" in session.xml
-            if (
-                session.is_sub_agent
-                or not has_action
-                or session.stats.processed_chars < 200
-                or session.stats.processed_chars > max_session_chars
-            ):
-                stats.skipped_sessions += 1
+            skip_reason = _session_skip_reason(session, has_action=has_action, max_session_chars=max_session_chars)
+            if skip_reason is not None:
+                _skip_session(stats, skip_reason)
                 continue
 
             store.save_processed_session(session.session_id, session.xml, session.stats.processed_chars)
 
             if existing and existing.status == ProcessedStatus.PROCESSED and existing.normalized_hash == normalized_hash:
-                stats.skipped_sessions += 1
+                _skip_session(stats, "already_processed")
                 continue
             processed_index.sessions[session.session_id] = ProcessedSessionState(
                 session_id=session.session_id,
@@ -103,7 +99,10 @@ def run_knowledge_extraction(
                     normalized_hash=normalized_hash,
                 )
             )
-        _progress(f"knowledge preprocess_sessions done pending={len(pending)} skipped={stats.skipped_sessions}")
+        _progress(
+            f"knowledge preprocess_sessions done pending={len(pending)} skipped={stats.skipped_sessions} "
+            f"skip_reasons={_format_skip_reasons(stats.skip_reasons)}"
+        )
 
         extractor = extractor or KnowledgeExtractor(settings)
         _progress(f"knowledge extract_sessions start sessions={len(pending)}")
@@ -153,6 +152,13 @@ def run_knowledge_extraction(
 
         if evidence_agent is not None:
             _progress(f"evidence_agent start records={len(all_admitted)}")
+            embedded_session_ids = evidence_agent.embedded_session_ids()
+            missing_embedding_sessions = set(session_xmls_for_evidence) - embedded_session_ids
+            if missing_embedding_sessions:
+                _progress(
+                    f"evidence_agent warning missing_turn_embeddings={len(missing_embedding_sessions)} "
+                    "run --embed-turns before large evidence runs to enable semantic search"
+                )
             verified = evidence_agent.verify_batch(all_admitted, session_xmls_for_evidence)
             admitted_count = sum(1 for r in verified if r.evidence_count > 0)
             rejected_count = len(verified) - admitted_count
@@ -186,6 +192,29 @@ def _admit_items(items: list[KnowledgeItemInput]) -> tuple[list[KnowledgeItemInp
         else:
             admitted.append(item)
     return admitted, rejected
+
+
+def _session_skip_reason(session: ProcessedSession, *, has_action: bool, max_session_chars: int) -> str | None:
+    if session.is_sub_agent:
+        return "sub_agent"
+    if not has_action:
+        return "no_action"
+    if session.stats.processed_chars < 200:
+        return "too_small"
+    if session.stats.processed_chars > max_session_chars:
+        return "too_large"
+    return None
+
+
+def _skip_session(stats: KnowledgeExtractionStats, reason: str) -> None:
+    stats.skipped_sessions += 1
+    stats.skip_reasons[reason] = stats.skip_reasons.get(reason, 0) + 1
+
+
+def _format_skip_reasons(skip_reasons: dict[str, int]) -> str:
+    if not skip_reasons:
+        return "{}"
+    return json.dumps(dict(sorted(skip_reasons.items())), ensure_ascii=False, sort_keys=True)
 
 
 def _record_from_item(session: ProcessedSession, item: KnowledgeItemInput) -> KnowledgeRecord:

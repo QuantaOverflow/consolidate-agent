@@ -39,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max processed chars per session for knowledge extraction",
     )
     parser.add_argument("--run-evidence-agent", action="store_true", help="Run Evidence Agent to verify evidence_turns after knowledge extraction")
+    parser.add_argument(
+        "--evidence-workers",
+        type=int,
+        default=10,
+        help="Number of session-level Evidence Agent workers",
+    )
     parser.add_argument("--run-consolidation", action="store_true", help="Run post-processing knowledge consolidation")
     parser.add_argument("--report", action="store_true", help="Print an observability report for the latest consolidation run")
     parser.add_argument("--embed", action="store_true", help="Build embedding indexes for pitfall and knowledge records")
@@ -147,7 +153,7 @@ def main() -> None:
         try:
             vector_store = KnowledgeVectorStore(store, create_dashscope_embeddings(settings))
             canonicals = store.list_active_canonicals()
-            knowledge_records = store.list_all_knowledge_records()
+            knowledge_records = store.list_verified_knowledge_records()
             missing_canonicals = sum(
                 1 for canonical in canonicals if store.get_canonical_embedding(canonical.canonical_id) is None
             )
@@ -168,7 +174,7 @@ def main() -> None:
                 chroma_path=Path("outputs/chroma/session_turns"),
                 embeddings=create_dashscope_embeddings(settings),
             )
-            evidence_agent = EvidenceAgent(settings, session_turn_store)
+            evidence_agent = EvidenceAgent(settings, session_turn_store, workers=args.evidence_workers)
 
         stats = run_knowledge_extraction(
             input_dir=input_dir,
@@ -186,6 +192,9 @@ def main() -> None:
         print(f"Evidence admitted: {stats.evidence_admitted_count}")
         print(f"Evidence rejected: {stats.evidence_rejected_count}")
         print(f"Sessions processed: {stats.processed_sessions}")
+        print(f"Sessions skipped: {stats.skipped_sessions}")
+        if stats.skip_reasons:
+            print(f"Session skip reasons: {dict(sorted(stats.skip_reasons.items()))}")
         print(f"Sessions failed: {stats.failed_sessions}")
         return
 

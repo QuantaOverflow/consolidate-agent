@@ -12,6 +12,31 @@ Only extract knowledge that meets ALL of the following:
 
 3. **Corrects or reveals something non-obvious** — the insight either corrects a plausible misconception, reveals undocumented behavior, or captures a design trade-off that only became clear through doing.
 
+## Evidence Boundary
+
+Keep each insight inside what the session actually proved. Do not add
+motivations, benefits, design principles, or best-practice framing unless the
+session explicitly discusses or demonstrates them.
+
+Prefer narrow, evidence-grounded insights over broad principles. Use normative
+phrasing such as "should", "must", "best practice", "reduces cognitive load",
+"matches human exploration", or "supports composability" only when the session
+contains direct evidence for that claim.
+
+Negative examples:
+
+- Bad: "CLI tools benefit from a list → detail → update command pattern because
+  it matches human exploration, reduces cognitive load, and supports piping."
+  If the session only implemented and used those commands, extract a narrower
+  fact instead: "A list/detail/update CLI made database entity inspection and
+  modification practical in this session."
+
+- Bad: "Integration tests should fail fast with clear errors when required
+  environment variables are missing." If the session only observed implicit
+  fallback to a surprising environment, extract that narrower insight instead:
+  "Implicit environment fallback can make integration tests target a different
+  service than the developer expected."
+
 ## What NOT to Extract
 
 - Standard API usage or flag behavior documented in official docs (e.g., "git push -u sets upstream tracking", "asyncio.run() starts the event loop")

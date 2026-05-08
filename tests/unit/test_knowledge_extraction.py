@@ -237,9 +237,85 @@ def test_max_session_chars_filter_skips_before_extraction(tmp_path: Path) -> Non
 
     assert stats.discovered_sessions == 1
     assert stats.skipped_sessions == 1
+    assert stats.skip_reasons == {"too_large": 1}
     assert stats.processed_sessions == 0
     store = KnowledgeStore(tmp_path / "knowledge.db")
     try:
         assert store.count_knowledge_records() == 0
     finally:
         store.close()
+
+
+def test_no_action_filter_records_skip_reason(tmp_path: Path) -> None:
+    events = [
+        event
+        for event in session_events()
+        if not (
+            event["type"] == "response_item"
+            and event["payload"].get("type") == "function_call"
+        )
+        and not (
+            event["type"] == "event_msg"
+            and event["payload"].get("type") == "exec_command_end"
+        )
+    ]
+    write_jsonl(tmp_path / "session.jsonl", events)
+
+    class FailingExtractor(KnowledgeExtractor):
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        def extract(self, session: ProcessedSession) -> list[KnowledgeItemInput]:
+            raise AssertionError("extractor should not run for no-action sessions")
+
+    stats = pipeline.run_knowledge_extraction(
+        input_dir=tmp_path,
+        output_dir=tmp_path / "out",
+        processed_index_path=tmp_path / "knowledge-processed-index.json",
+        knowledge_db_path=tmp_path / "knowledge.db",
+        settings=Settings(dashscope_api_key="test"),
+        extractor=FailingExtractor(Settings(dashscope_api_key="test")),
+    )
+
+    assert stats.skipped_sessions == 1
+    assert stats.skip_reasons == {"no_action": 1}
+
+
+def test_already_processed_filter_records_skip_reason(tmp_path: Path) -> None:
+    write_jsonl(tmp_path / "session.jsonl", session_events())
+
+    class FakeExtractor(KnowledgeExtractor):
+        def __init__(self, settings: Settings):
+            self.settings = settings
+
+        def extract(self, session: ProcessedSession) -> list[KnowledgeItemInput]:
+            return [
+                KnowledgeItemInput(
+                    title="Admitted item",
+                    insight="Use structured records when storing extracted transferable knowledge.",
+                    applicability="Applies to extraction pipelines that write durable knowledge records.",
+                    scope=KnowledgeScope.GLOBAL,
+                )
+            ]
+
+    first = pipeline.run_knowledge_extraction(
+        input_dir=tmp_path,
+        output_dir=tmp_path / "out",
+        processed_index_path=tmp_path / "knowledge-processed-index.json",
+        knowledge_db_path=tmp_path / "knowledge.db",
+        settings=Settings(dashscope_api_key="test"),
+        extractor=FakeExtractor(Settings(dashscope_api_key="test")),
+    )
+    second = pipeline.run_knowledge_extraction(
+        input_dir=tmp_path,
+        output_dir=tmp_path / "out",
+        processed_index_path=tmp_path / "knowledge-processed-index.json",
+        knowledge_db_path=tmp_path / "knowledge.db",
+        settings=Settings(dashscope_api_key="test"),
+        extractor=FakeExtractor(Settings(dashscope_api_key="test")),
+    )
+
+    assert first.processed_sessions == 1
+    assert second.processed_sessions == 0
+    assert second.skipped_sessions == 1
+    assert second.skip_reasons == {"already_processed": 1}
