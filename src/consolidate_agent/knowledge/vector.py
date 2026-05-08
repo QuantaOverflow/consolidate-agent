@@ -148,6 +148,21 @@ class KnowledgeVectorStore(VectorStore):
         scored.sort(key=lambda item: item[0], reverse=True)
         return [canonical for _, canonical in scored[:k]]
 
+    def similarity_search_knowledge_records(self, query: str, k: int = 5) -> list[KnowledgeRecord]:
+        records = self.store.list_admitted_knowledge_records()
+        if not records:
+            return []
+        self.embed_knowledge_records(records)
+        query_embedding = self.embeddings.embed_query(query)
+        scored = []
+        for record in records:
+            embedding = self.store.get_knowledge_embedding(record.id)
+            if embedding is None:
+                continue
+            scored.append((_cosine_similarity(query_embedding, embedding), record))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [record for _, record in scored[:k]]
+
     def as_retriever_tool(self, name: str, description: str):
         try:
             from langchain.tools.retriever import create_retriever_tool
