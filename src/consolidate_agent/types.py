@@ -269,6 +269,7 @@ class RunStats(BaseModel):
 class KnowledgeExtractionStats(BaseModel):
     discovered_sessions: int = 0
     skipped_sessions: int = 0
+    skip_reasons: dict[str, int] = Field(default_factory=dict)
     processed_sessions: int = 0
     failed_sessions: int = 0
     extracted_count: int = 0

@@ -6,6 +6,7 @@ from langchain_core.embeddings import Embeddings
 
 from consolidate_agent.knowledge.session_turn_store import (
     _CHUNK_SIZE,
+    _normalize_distances,
     _split_chunks,
     SessionTurnStore,
 )
@@ -50,6 +51,24 @@ class FakeEmbeddings(Embeddings):
         return [0.1] * 10
 
 
+class FakeDocument:
+    def __init__(self, turn_index: int):
+        self.metadata = {"turn_index": turn_index}
+
+
+class FakeChroma:
+    def __init__(self, results):
+        self.results = results
+        self.calls = []
+
+    def similarity_search_with_score(self, query: str, k: int, filter: dict):
+        self.calls.append({"query": query, "k": k, "filter": filter})
+        return self.results
+
+    def similarity_search_with_relevance_scores(self, *args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("search_turns should use raw distance scores")
+
+
 def test_embed_session_uses_summary_when_summarizer_provided(tmp_path: Path) -> None:
     embeddings = FakeEmbeddings()
     store = SessionTurnStore(
@@ -83,3 +102,25 @@ def test_search_turns_translates_query_when_translator_provided(tmp_path: Path) 
     store.embed_session("s1", SESSION_XML)
     store.search_turns("s1", "English query")
     assert embeddings.last_query == "中文查询"
+
+
+def test_normalize_distances_maps_raw_distance_to_relative_score() -> None:
+    assert _normalize_distances([2.0, 4.0, 6.0]) == [1.0, 0.5, 0.0]
+    assert _normalize_distances([3.0, 3.0]) == [1.0, 1.0]
+    assert _normalize_distances([]) == []
+
+
+def test_search_turns_uses_raw_distance_and_normalizes_scores(tmp_path: Path) -> None:
+    store = SessionTurnStore(tmp_path / "chroma", FakeEmbeddings())
+    store._chroma = FakeChroma(
+        [
+            (FakeDocument(1), 2.0),
+            (FakeDocument(2), 4.0),
+            (FakeDocument(1), 6.0),
+        ]
+    )
+
+    results = store.search_turns("s1", "query", top_k=2)
+
+    assert results == [{"turn_index": 1, "score": 1.0}, {"turn_index": 2, "score": 0.5}]
+    assert store._chroma.calls == [{"query": "query", "k": 6, "filter": {"session_id": "s1"}}]

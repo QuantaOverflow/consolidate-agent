@@ -74,16 +74,17 @@ class SessionTurnStore:
         effective_query = precomputed_query if precomputed_query is not None else query
         if precomputed_query is None and self._translator is not None:
             effective_query = self._translator(query)
-        results = self._chroma.similarity_search_with_relevance_scores(
+        results = self._chroma.similarity_search_with_score(
             effective_query,
             k=top_k * 3,
             filter={"session_id": session_id},
         )
+        normalized_scores = _normalize_distances([float(distance) for _, distance in results])
         seen: dict[int, float] = {}
-        for document, score in results:
+        for (document, _), score in zip(results, normalized_scores, strict=True):
             turn_index = int(document.metadata["turn_index"])
             if turn_index not in seen or score > seen[turn_index]:
-                seen[turn_index] = float(score)
+                seen[turn_index] = score
         return sorted(
             [{"turn_index": ti, "score": score} for ti, score in seen.items()],
             key=lambda x: x["score"],
@@ -134,6 +135,17 @@ class SessionTurnStore:
 
 def _split_chunks(text: str, chunk_size: int) -> list[str]:
     return [text[i : i + chunk_size] for i in range(0, max(len(text), 1), chunk_size)]
+
+
+def _normalize_distances(distances: list[float]) -> list[float]:
+    if not distances:
+        return []
+    min_distance = min(distances)
+    max_distance = max(distances)
+    if min_distance == max_distance:
+        return [1.0 for _ in distances]
+    span = max_distance - min_distance
+    return [1.0 - (distance - min_distance) / span for distance in distances]
 
 
 def _chunk_id(session_id: str, turn_index: int, chunk_index: int) -> str:

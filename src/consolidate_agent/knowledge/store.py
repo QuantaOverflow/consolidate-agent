@@ -335,7 +335,6 @@ class KnowledgeStore:
                 scope TEXT NOT NULL,
                 evidence_turns_json TEXT NOT NULL,
                 evidence_count INTEGER NOT NULL,
-                evidence_spread REAL DEFAULT 0.0,
                 processed_chars INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -493,7 +492,12 @@ class KnowledgeStore:
     def load_all_knowledge_embeddings(self) -> dict[str, list[float]]:
         with self._lock:
             rows = self.connection.execute(
-                "SELECT record_id, embedding FROM source_knowledge_records WHERE embedding IS NOT NULL"
+                """
+                SELECT record_id, embedding
+                FROM source_knowledge_records
+                WHERE embedding IS NOT NULL
+                  AND evidence_count > 0
+                """
             ).fetchall()
         return {row[0]: json.loads(row[1]) for row in rows}
 
@@ -506,6 +510,7 @@ class KnowledgeStore:
                        processed_chars, created_at, updated_at
                 FROM source_knowledge_records
                 WHERE embedding IS NULL
+                  AND evidence_count > 0
                 ORDER BY record_id
                 """
             ).fetchall()
@@ -536,9 +541,9 @@ class KnowledgeStore:
             """
             INSERT INTO source_knowledge_records (
                 record_id, session_id, title, insight, applicability, scope,
-                evidence_turns_json, evidence_count, evidence_spread,
+                evidence_turns_json, evidence_count,
                 processed_chars, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(record_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 title = excluded.title,
@@ -559,7 +564,6 @@ class KnowledgeStore:
                 record.scope.value,
                 json.dumps(record.evidence_turns, ensure_ascii=False),
                 record.evidence_count,
-                0.0,
                 record.processed_chars,
                 record.created_at.isoformat(),
                 record.updated_at.isoformat(),
@@ -575,6 +579,19 @@ class KnowledgeStore:
                    evidence_turns_json, evidence_count,
                    processed_chars, created_at, updated_at
             FROM source_knowledge_records
+            ORDER BY record_id
+            """
+        ).fetchall()
+        return [_knowledge_record_from_row(row) for row in rows]
+
+    def list_verified_knowledge_records(self) -> list[KnowledgeRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT record_id, session_id, title, insight, applicability, scope,
+                   evidence_turns_json, evidence_count,
+                   processed_chars, created_at, updated_at
+            FROM source_knowledge_records
+            WHERE evidence_count > 0
             ORDER BY record_id
             """
         ).fetchall()

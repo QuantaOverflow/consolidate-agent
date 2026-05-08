@@ -97,7 +97,11 @@ class KnowledgeVectorStore(VectorStore):
             self.store.save_tag_embedding(tag.tag_id, embedding)
 
     def embed_knowledge_records(self, records: list[KnowledgeRecord]) -> None:
-        missing = [record for record in records if self.store.get_knowledge_embedding(record.id) is None]
+        missing = [
+            record
+            for record in records
+            if record.evidence_count > 0 and self.store.get_knowledge_embedding(record.id) is None
+        ]
         if not missing:
             return
         vectors = self.embeddings.embed_documents([_knowledge_record_text(record) for record in missing])
@@ -177,7 +181,7 @@ def find_related_knowledge(
     if canonical_embedding is None:
         return []
 
-    records = store.list_all_knowledge_records()
+    records = store.list_verified_knowledge_records()
     if not records:
         return []
 
@@ -212,7 +216,7 @@ def search_knowledge(
     threshold: float = 0.0,
 ) -> list[dict]:
     query_embedding = embeddings.embed_query(query_text)
-    records = store.list_all_knowledge_records()
+    records = store.list_verified_knowledge_records()
     if not records:
         return []
 

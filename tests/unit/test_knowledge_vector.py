@@ -7,7 +7,7 @@ import pytest
 from langchain_core.embeddings import Embeddings
 
 from consolidate_agent.knowledge.store import KnowledgeStore
-from consolidate_agent.knowledge.vector import KnowledgeVectorStore, find_related_knowledge
+from consolidate_agent.knowledge.vector import KnowledgeVectorStore, find_related_knowledge, search_knowledge
 from consolidate_agent.types import (
     CanonicalKnowledge,
     KnowledgeRecord,
@@ -36,7 +36,7 @@ def _store(tmp_path: Path) -> KnowledgeStore:
     return KnowledgeStore(tmp_path / "knowledge.db")
 
 
-def _knowledge_record(record_id: str, title: str | None = None) -> KnowledgeRecord:
+def _knowledge_record(record_id: str, title: str | None = None, *, evidence_count: int = 2) -> KnowledgeRecord:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return KnowledgeRecord(
         id=record_id,
@@ -45,9 +45,8 @@ def _knowledge_record(record_id: str, title: str | None = None) -> KnowledgeReco
         insight=f"Insight {record_id}",
         applicability=f"Applicability {record_id}",
         scope=KnowledgeScope.GLOBAL,
-        evidence_turns=[1, 2],
-        evidence_count=2,
-        evidence_spread=0.5,
+        evidence_turns=[1, 2] if evidence_count > 0 else [],
+        evidence_count=evidence_count,
         processed_chars=1200,
         created_at=now,
         updated_at=now,
@@ -96,6 +95,45 @@ def test_embed_knowledge_records_is_idempotent_for_existing_embeddings(tmp_path:
         store.close()
 
 
+def test_embed_knowledge_records_skips_soft_rejected_records(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        rejected = _knowledge_record("knowledge-0", "Soft rejected", evidence_count=0)
+        verified = _knowledge_record("knowledge-1", "Verified")
+        store.upsert_knowledge_record(rejected)
+        store.upsert_knowledge_record(verified)
+
+        embeddings = FakeEmbeddings(vectors=[[0.0, 1.0]])
+        vector_store = KnowledgeVectorStore(store, embeddings)
+
+        vector_store.embed_knowledge_records([rejected, verified])
+
+        assert embeddings.document_calls == [
+            [
+                "Title: Verified\n"
+                "Insight: Insight knowledge-1\n"
+                "Applicability: Applicability knowledge-1"
+            ]
+        ]
+        assert store.get_knowledge_embedding(rejected.id) is None
+        assert store.get_knowledge_embedding(verified.id) == [0.0, 1.0]
+    finally:
+        store.close()
+
+
+def test_unembedded_knowledge_records_excludes_soft_rejected_records(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        rejected = _knowledge_record("knowledge-0", "Soft rejected", evidence_count=0)
+        verified = _knowledge_record("knowledge-1", "Verified")
+        store.upsert_knowledge_record(rejected)
+        store.upsert_knowledge_record(verified)
+
+        assert [record.id for record in store.list_knowledge_records_without_embedding()] == ["knowledge-1"]
+    finally:
+        store.close()
+
+
 def test_knowledge_vector_store_does_not_own_related_knowledge_search() -> None:
     assert not hasattr(KnowledgeVectorStore, "find_related_knowledge")
 
@@ -137,6 +175,41 @@ def test_find_related_knowledge_filters_by_threshold_and_orders_by_similarity(tm
             "scope": "global",
             "similarity_score": 1.0,
         }
+    finally:
+        store.close()
+
+
+def test_find_related_knowledge_excludes_soft_rejected_records(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        canonical = _canonical()
+        verified = _knowledge_record("knowledge-1", "Verified")
+        rejected = _knowledge_record("knowledge-0", "Soft rejected", evidence_count=0)
+        store.create_canonical(canonical)
+        store.save_canonical_embedding(canonical.canonical_id, [1.0, 0.0])
+        for record in [verified, rejected]:
+            store.upsert_knowledge_record(record)
+            store.save_knowledge_embedding(record.id, [1.0, 0.0])
+
+        results = find_related_knowledge(store, FakeEmbeddings(), canonical.canonical_id, threshold=0.75, top_k=3)
+
+        assert [result["record_id"] for result in results] == ["knowledge-1"]
+    finally:
+        store.close()
+
+
+def test_search_knowledge_excludes_soft_rejected_records(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    try:
+        verified = _knowledge_record("knowledge-1", "Verified")
+        rejected = _knowledge_record("knowledge-0", "Soft rejected", evidence_count=0)
+        for record in [verified, rejected]:
+            store.upsert_knowledge_record(record)
+            store.save_knowledge_embedding(record.id, [1.0, 0.0])
+
+        results = search_knowledge(store, FakeEmbeddings(vectors=[[1.0, 0.0]]), "query", top_k=3)
+
+        assert [result["record"].id for result in results] == ["knowledge-1"]
     finally:
         store.close()
 
