@@ -48,7 +48,13 @@ class KnowledgeExtractor:
 
     def extract(self, session: ProcessedSession) -> list[KnowledgeItemInput]:
         prompt_value = self.prompt.invoke({"session_xml": session.xml})
-        result = self.structured_model.invoke(prompt_value)
+        result = None
+        for attempt in range(1, 4):
+            result = self.structured_model.invoke(prompt_value)
+            if result is not None:
+                break
+            if attempt < 3:
+                print(f"KnowledgeExtractor retry attempt {attempt + 1} for session {session.session_id}")
         if result is None:
             raise ValueError(f"KnowledgeExtractor returned no structured output for session {session.session_id}")
         return list(result.items)

@@ -89,6 +89,17 @@ class FakeStructuredModel:
         )
 
 
+class RetryStructuredModel:
+    def __init__(self, results: list[KnowledgeExtractionOutput | None]):
+        self.results = results
+        self.calls = 0
+
+    def invoke(self, prompt_value: object) -> KnowledgeExtractionOutput | None:
+        result = self.results[self.calls]
+        self.calls += 1
+        return result
+
+
 def test_knowledge_extractor_extract_returns_structured_items() -> None:
     extractor = object.__new__(KnowledgeExtractor)
     extractor.prompt = ChatPromptTemplate.from_messages(
@@ -111,6 +122,67 @@ def test_knowledge_extractor_extract_returns_structured_items() -> None:
     assert len(items) == 1
     assert items[0].title == "Structured errors"
     assert items[0].scope == KnowledgeScope.GLOBAL
+
+
+def test_knowledge_extractor_retries_none_structured_output(capsys) -> None:
+    extractor = object.__new__(KnowledgeExtractor)
+    extractor.prompt = ChatPromptTemplate.from_messages(
+        [("user", "Session:\n{{ session_xml }}")],
+        template_format="jinja2",
+    )
+    output = KnowledgeExtractionOutput(
+        items=[
+            KnowledgeItemInput(
+                title="Retry succeeds",
+                insight="Structured output retries should recover when the model initially returns no parsed object.",
+                applicability="Applies to LangChain structured output calls that occasionally parse to None.",
+                scope=KnowledgeScope.GLOBAL,
+            )
+        ]
+    )
+    extractor.structured_model = RetryStructuredModel([None, None, output])
+    session = ProcessedSession(
+        session_id="session-retry",
+        cwd="/repo",
+        thread_name=None,
+        started_at="2026-04-17T09:00:00Z",
+        is_sub_agent=False,
+        xml="<session><turn index=\"1\"><user>u</user><assistant>a</assistant></turn></session>",
+        stats=ContextStats(raw_chars=500, processed_chars=300, compression_ratio=0.4),
+    )
+
+    items = extractor.extract(session)
+
+    captured = capsys.readouterr()
+    assert extractor.structured_model.calls == 3
+    assert [item.title for item in items] == ["Retry succeeds"]
+    assert "KnowledgeExtractor retry attempt 2 for session session-retry" in captured.out
+    assert "KnowledgeExtractor retry attempt 3 for session session-retry" in captured.out
+
+
+def test_knowledge_extractor_raises_after_retry_exhaustion() -> None:
+    extractor = object.__new__(KnowledgeExtractor)
+    extractor.prompt = ChatPromptTemplate.from_messages(
+        [("user", "Session:\n{{ session_xml }}")],
+        template_format="jinja2",
+    )
+    extractor.structured_model = RetryStructuredModel([None, None, None])
+    session = ProcessedSession(
+        session_id="session-fail",
+        cwd="/repo",
+        thread_name=None,
+        started_at="2026-04-17T09:00:00Z",
+        is_sub_agent=False,
+        xml="<session><turn index=\"1\"><user>u</user><assistant>a</assistant></turn></session>",
+        stats=ContextStats(raw_chars=500, processed_chars=300, compression_ratio=0.4),
+    )
+
+    try:
+        extractor.extract(session)
+    except ValueError as exc:
+        assert "KnowledgeExtractor returned no structured output for session session-fail" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError after retry exhaustion")
 
 
 def test_admission_rejects_session_specific_only() -> None:
