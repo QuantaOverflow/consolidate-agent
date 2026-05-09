@@ -30,6 +30,7 @@ def _render_note(record: KnowledgeRecord, tags: list[str]) -> str:
         f"evidence_count: {record.evidence_count}\n"
         f"tags: [{frontmatter_tags}]\n"
         f"session_id: {record.session_id}\n"
+        f"evidence_turns: {record.evidence_turns}\n"
         f"created_at: {record.created_at.isoformat()}\n"
         "---\n\n"
         "## Insight\n\n"
