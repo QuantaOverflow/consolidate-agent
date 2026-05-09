@@ -38,3 +38,6 @@ packages = ["src/consolidate_agent"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests/unit"]
+markers = [
+    "requires_api: tests that call real external APIs (DashScope); set DASHSCOPE_API_KEY to run",
+]

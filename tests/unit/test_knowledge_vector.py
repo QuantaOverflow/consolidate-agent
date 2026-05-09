@@ -7,13 +7,10 @@ import pytest
 from langchain_core.embeddings import Embeddings
 
 from consolidate_agent.knowledge.store import KnowledgeStore
-from consolidate_agent.knowledge.vector import KnowledgeVectorStore, find_related_knowledge, search_knowledge
+from consolidate_agent.knowledge.vector import KnowledgeVectorStore, search_knowledge
 from consolidate_agent.types import (
-    CanonicalKnowledge,
     KnowledgeRecord,
     KnowledgeScope,
-    PitfallCategory,
-    PitfallScope,
 )
 
 
@@ -48,21 +45,6 @@ def _knowledge_record(record_id: str, title: str | None = None, *, evidence_coun
         evidence_turns=[1, 2] if evidence_count > 0 else [],
         evidence_count=evidence_count,
         processed_chars=1200,
-        created_at=now,
-        updated_at=now,
-    )
-
-
-def _canonical(canonical_id: str = "canonical-1") -> CanonicalKnowledge:
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    return CanonicalKnowledge(
-        canonical_id=canonical_id,
-        title="Canonical pitfall",
-        category=PitfallCategory.EXECUTION_STRATEGY,
-        summary="A pitfall that should retrieve related knowledge.",
-        preventive_rule="Check related operating knowledge before acting.",
-        scope=PitfallScope.GLOBAL,
-        support_count=1,
         created_at=now,
         updated_at=now,
     )
@@ -147,57 +129,6 @@ def test_save_embedding_raises_for_missing_record(tmp_path: Path) -> None:
         store.close()
 
 
-def test_find_related_knowledge_filters_by_threshold_and_orders_by_similarity(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    try:
-        canonical = _canonical()
-        store.create_canonical(canonical)
-        store.save_canonical_embedding(canonical.canonical_id, [1.0, 0.0])
-
-        strong = _knowledge_record("knowledge-1", "Strong match")
-        medium = _knowledge_record("knowledge-2", "Medium match")
-        weak = _knowledge_record("knowledge-3", "Weak match")
-        for record in [medium, weak, strong]:
-            store.upsert_knowledge_record(record)
-        store.save_knowledge_embedding(strong.id, [1.0, 0.0])
-        store.save_knowledge_embedding(medium.id, [0.8, 0.6])
-        store.save_knowledge_embedding(weak.id, [0.0, 1.0])
-
-        results = find_related_knowledge(store, FakeEmbeddings(), canonical.canonical_id, threshold=0.75, top_k=3)
-
-        assert [result["record_id"] for result in results] == ["knowledge-1", "knowledge-2"]
-        assert results[0]["similarity_score"] > results[1]["similarity_score"]
-        assert results[0] == {
-            "record_id": "knowledge-1",
-            "title": "Strong match",
-            "insight": "Insight knowledge-1",
-            "applicability": "Applicability knowledge-1",
-            "scope": "global",
-            "similarity_score": 1.0,
-        }
-    finally:
-        store.close()
-
-
-def test_find_related_knowledge_excludes_soft_rejected_records(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    try:
-        canonical = _canonical()
-        verified = _knowledge_record("knowledge-1", "Verified")
-        rejected = _knowledge_record("knowledge-0", "Soft rejected", evidence_count=0)
-        store.create_canonical(canonical)
-        store.save_canonical_embedding(canonical.canonical_id, [1.0, 0.0])
-        for record in [verified, rejected]:
-            store.upsert_knowledge_record(record)
-            store.save_knowledge_embedding(record.id, [1.0, 0.0])
-
-        results = find_related_knowledge(store, FakeEmbeddings(), canonical.canonical_id, threshold=0.75, top_k=3)
-
-        assert [result["record_id"] for result in results] == ["knowledge-1"]
-    finally:
-        store.close()
-
-
 def test_search_knowledge_excludes_soft_rejected_records(tmp_path: Path) -> None:
     store = _store(tmp_path)
     try:
@@ -214,27 +145,3 @@ def test_search_knowledge_excludes_soft_rejected_records(tmp_path: Path) -> None
         store.close()
 
 
-def test_find_related_knowledge_returns_empty_when_pitfall_has_no_embedding(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    try:
-        canonical = _canonical()
-        record = _knowledge_record("knowledge-1")
-        store.create_canonical(canonical)
-        store.upsert_knowledge_record(record)
-        store.save_knowledge_embedding(record.id, [1.0, 0.0])
-
-        assert find_related_knowledge(store, FakeEmbeddings(), canonical.canonical_id) == []
-    finally:
-        store.close()
-
-
-def test_find_related_knowledge_returns_empty_when_knowledge_records_are_empty(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    try:
-        canonical = _canonical()
-        store.create_canonical(canonical)
-        store.save_canonical_embedding(canonical.canonical_id, [1.0, 0.0])
-
-        assert find_related_knowledge(store, FakeEmbeddings(), canonical.canonical_id) == []
-    finally:
-        store.close()
