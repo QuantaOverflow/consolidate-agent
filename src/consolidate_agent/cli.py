@@ -14,7 +14,6 @@ from consolidate_agent.knowledge.obsidian_export import export_to_obsidian
 from consolidate_agent.knowledge_extraction.pipeline import run_knowledge_extraction
 from consolidate_agent.knowledge.session_turn_store import SessionTurnStore
 from consolidate_agent.knowledge.store import KnowledgeStore
-from consolidate_agent.knowledge.tag_extractor import KnowledgeTagExtractor, deduplicate_tags
 from consolidate_agent.knowledge.vector import KnowledgeVectorStore, create_dashscope_embeddings, search_knowledge
 from consolidate_agent.prompt_loader import load_prompt
 
@@ -49,7 +48,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--evidence-reject-trace-path",
         help="Evidence Agent judge reject trace JSONL path",
     )
-    parser.add_argument("--run-knowledge-consolidation", action="store_true", help="Run knowledge record tag consolidation")
     parser.add_argument("--export-dir", help="Export admitted knowledge records as Obsidian Markdown notes")
     parser.add_argument("--embed-turns", action="store_true", help="Build embedding index for processed session turns")
     parser.add_argument("--query", help="Search embedded knowledge records by text")
@@ -75,10 +73,6 @@ def main() -> None:
 
     if args.query is not None:
         _run_query(settings, paths.knowledge_db_path, args)
-        return
-
-    if args.run_knowledge_consolidation:
-        _run_knowledge_consolidation(settings, paths.knowledge_db_path)
         return
 
     if args.stage == "extract":
@@ -123,10 +117,9 @@ def _validate_args(args: argparse.Namespace) -> None:
         args.stage is not None,
         args.query is not None,
         args.embed_turns,
-        args.run_knowledge_consolidation,
     ]
     if sum(1 for enabled in exclusive_modes if enabled) > 1:
-        print("Error: --stage, --query, --embed-turns, and --run-knowledge-consolidation are mutually exclusive")
+        print("Error: --stage, --query, and --embed-turns are mutually exclusive")
         sys.exit(1)
 
 
@@ -203,20 +196,14 @@ def _run_verify(store: KnowledgeStore, settings: Settings, args: argparse.Namesp
 
 
 def _run_tag(store: KnowledgeStore, settings: Settings) -> None:
-    tagged_ids = set(store.load_all_knowledge_tags().keys())
-    records = [record for record in store.list_admitted_knowledge_records() if record.id not in tagged_ids]
-    if records:
-        tags_map = KnowledgeTagExtractor(settings).extract_tags_batch(records)
-        for record_id, tags in tags_map.items():
-            store.save_knowledge_tags(record_id, tags)
-    print(f"Extracted tags for {len(records)} records")
-
-    all_tags_by_record = store.load_all_knowledge_tags()
-    unique_tags = sorted({tag for tags in all_tags_by_record.values() for tag in tags})
-    print(f"Deduplicating {len(unique_tags)} unique tags across {len(all_tags_by_record)} records...")
-    merge_map = deduplicate_tags(unique_tags, settings)
-    updated = store.apply_tag_merge_map(merge_map)
-    print(f"Merged {len(merge_map)} tags, updated {updated} records")
+    vector_store = KnowledgeVectorStore(store, create_dashscope_embeddings(settings))
+    no_tag_records = store.list_no_tag_knowledge_records()
+    records = no_tag_records if no_tag_records else store.list_admitted_knowledge_records()
+    if not records:
+        print("No records to tag.")
+        return
+    run_knowledge_consolidation(records, store, vector_store, settings)
+    print(f"Knowledge consolidation done: {len(records)} records (no_tag={len(no_tag_records)})")
 
 
 def _run_embed(store: KnowledgeStore, settings: Settings) -> None:
@@ -326,17 +313,6 @@ def _run_query(settings: Settings, knowledge_db_path: Path, args: argparse.Names
     finally:
         store.close()
 
-
-def _run_knowledge_consolidation(settings: Settings, knowledge_db_path: Path) -> None:
-    store = KnowledgeStore(knowledge_db_path)
-    try:
-        vector_store = KnowledgeVectorStore(store, create_dashscope_embeddings(settings))
-        no_tag_records = store.list_no_tag_knowledge_records()
-        records = no_tag_records if no_tag_records else store.list_admitted_knowledge_records()
-        run_knowledge_consolidation(records, store, vector_store, settings)
-        print(f"Knowledge consolidation done: {len(records)} records (no_tag={len(no_tag_records)})")
-    finally:
-        store.close()
 
 
 def _evidence_agent_kwargs(args: argparse.Namespace) -> dict[str, Path]:

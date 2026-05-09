@@ -2,17 +2,7 @@
 
 Offline-first knowledge consolidation tools for Codex session history.
 
-The project currently has three runnable tracks:
-
-- `pitfall extraction`: normalize Codex sessions, split large transcripts,
-  extract pitfall candidates, admit reusable pitfall records, and write
-  `outputs/candidates.json` plus source records in SQLite.
-- `knowledge extraction`: convert complete sessions into compact XML, extract
-  transferable knowledge records, and write them to `source_knowledge_records`.
-- `consolidation`: canonicalize admitted pitfall source records, govern
-  mechanism tags, classify canonical rules, and persist rule-tag assignments.
-- `embedding index`: embed canonical pitfalls and transferable knowledge
-  records for semantic retrieval.
+The project has transitioned to a unified knowledge extraction pipeline, consolidating both pitfalls and generic transferable insights into durable `KnowledgeRecord` objects.
 
 ## Development
 
@@ -29,114 +19,90 @@ Run the CLI:
 uv run consolidate-agent --help
 ```
 
-Run pitfall extraction:
+### Knowledge Pipeline Stages
+
+The CLI now operates via a `--stage` argument to run specific parts of the pipeline:
+
+Run knowledge extraction (without verification):
 
 ```bash
 uv run python -m consolidate_agent \
+  --stage extract \
   --sample-limit 20 \
   --output-dir ./outputs \
-  --processed-index-path ./outputs/processed-index.json \
+  --knowledge-processed-index-path ./outputs/knowledge-processed-index.json \
   --knowledge-db-path ./outputs/knowledge.db
 ```
 
-Run generic session knowledge extraction:
+Verify extracted records with Evidence Agent:
 
 ```bash
 uv run python -m consolidate_agent \
-  --extract-knowledge \
-  --sample-limit 20 \
-  --knowledge-processed-index-path ./outputs/knowledge-processed-index.json \
-  --knowledge-db-path ./outputs/knowledge.db \
-  --max-session-chars 100000
-```
-
-Run generic session knowledge extraction with Evidence Agent verification:
-
-```bash
-uv run python -m consolidate_agent \
-  --extract-knowledge \
-  --run-evidence-agent \
+  --stage verify \
   --evidence-workers 10 \
-  --knowledge-processed-index-path ./outputs/knowledge-processed-index.json \
   --knowledge-db-path ./outputs/knowledge.db \
   --evidence-failure-trace-path ./outputs/evidence-agent-failures.jsonl \
   --evidence-reject-trace-path ./outputs/evidence-agent-rejects.jsonl
 ```
 
-Build reusable turn embeddings before large Evidence Agent runs:
+Run tag extraction and deduplication:
 
 ```bash
 uv run python -m consolidate_agent \
-  --knowledge-db-path ./outputs/knowledge.db \
-  --embed-turns
+  --stage tag \
+  --knowledge-db-path ./outputs/knowledge.db
 ```
 
-Evidence Agent uses turn embeddings for semantic search, fills in missing
-session turn embeddings before verification, and verifies records with
-session-level workers. Records from the same session share parsed turns and
-text-search cache. A record is admitted only when the judge returns `admit` with
-at least one concrete `evidence_turn`; empty-evidence admits remain soft
-rejected with `evidence_count=0`.
-
-Run pitfall extraction plus consolidation:
+Embed active knowledge records:
 
 ```bash
 uv run python -m consolidate_agent \
+  --stage embed \
+  --knowledge-db-path ./outputs/knowledge.db
+```
+
+Export knowledge records to Obsidian:
+
+```bash
+uv run python -m consolidate_agent \
+  --stage export \
+  --knowledge-db-path ./outputs/knowledge.db \
+  --export-dir ~/Documents/Obsidian/Knowledge
+```
+
+Run the complete pipeline end-to-end:
+
+```bash
+uv run python -m consolidate_agent \
+  --stage full \
   --sample-limit 50 \
-  --output-dir /tmp/consolidate-real-sessions-50-output \
-  --cursor-path /tmp/consolidate-real-sessions-50-output/cursor.json \
-  --processed-index-path /tmp/consolidate-real-sessions-50-output/processed-index.json \
-  --knowledge-db-path /tmp/knowledge-real-sessions-50.db \
-  --run-consolidation \
-  --report
+  --output-dir ./outputs \
+  --knowledge-processed-index-path ./outputs/knowledge-processed-index.json \
+  --knowledge-db-path ./outputs/knowledge.db \
+  --export-dir ~/Documents/Obsidian/Knowledge
 ```
 
-Build embedding indexes:
+### Utilities
+
+Build reusable turn embeddings for session fragments (uses Chroma):
 
 ```bash
 uv run python -m consolidate_agent \
-  --knowledge-db-path ./outputs/knowledge.db \
-  --embed
+  --embed-turns \
+  --knowledge-db-path ./outputs/knowledge.db
 ```
 
-`--embed` is a manual indexing command. It embeds active rows in
-`canonical_knowledge` and verified rows in `source_knowledge_records`
-(`evidence_count > 0`), skips records that already have embeddings, and prints
-how many verified records were missing embeddings before the run.
+Search embedded knowledge records:
+
+```bash
+uv run python -m consolidate_agent \
+  --query "python environment setup issues" \
+  --top-k 5 \
+  --knowledge-db-path ./outputs/knowledge.db
+```
 
 ## Current Consolidation Mode
 
-The consolidation stage now uses a LangGraph workflow with strict separation
-between taxonomy discovery and rule classification.
+The consolidation stage uses a LangGraph workflow with strict separation between taxonomy discovery and rule classification.
 
-Cold start, with no active tags:
-
-1. canonicalize source pitfalls into durable canonical rules with an LLM structured-output stage
-2. draft mechanism-tag taxonomy proposals from untagged canonical rules
-3. govern proposals into accepted, merged, or rejected active tags
-4. classify each untagged canonical rule against the governed tag pool
-5. persist rule-tag assignments
-
-Warm start, with active tags:
-
-1. canonicalize source pitfalls into durable canonical rules with an LLM structured-output stage
-2. classify untagged canonical rules against the active tag pool
-3. check whether omitted canonical rules are covered by existing tags
-4. draft and govern taxonomy only for uncovered canonical rules, if any
-5. classify remaining uncovered canonical rules and persist assignments
-
-Rule classification cannot create or rename tags. If the governed taxonomy is
-insufficient, the batch fails instead of silently creating labels during
-classification.
-
-`LLMTagCoverageChecker` decides which omitted canonical rules cannot be covered
-by existing active tags before the workflow drafts new taxonomy proposals.
-
-The abstract pattern layer is intentionally out of the active extraction path.
-It can be reintroduced later only if governed tags become stable enough to
-support a higher-level abstraction that is not just a duplicate of tag profiles.
-
-Generic session knowledge records are intentionally parallel to the pitfall
-consolidation graph today. They can be embedded for retrieval and compared
-against embedded canonical pitfalls with `find_related_knowledge`, but they
-are not canonicalized into rules or mechanism tags.
+Generic session knowledge records and pitfalls are now consolidated into a unified extraction pipeline. They are embedded for retrieval and compared against embedded canonical pitfalls with `search_knowledge`, and are canonicalized into rules or mechanism tags. Turn embeddings are stored using Langchain Chroma.
