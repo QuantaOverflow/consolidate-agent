@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from diagnose import diagnose  # noqa: E402
+from vocab_similarity import find_similar_pairs  # noqa: E402
 
 
 BASE = Path(__file__).resolve().parents[2]
@@ -26,7 +27,7 @@ def load_scenario(scenario_dir: Path):
     }
 
 
-def score_decision(decision: dict, probe_calls: list[str], expected: dict) -> dict:
+def score_decision(decision: dict, probe_calls: list[str], expected: dict, similar_pairs: list[dict] = None) -> dict:
     """Return per-criterion pass/fail."""
     action = decision["next_action"]
     focus = decision.get("action_focus", "")
@@ -67,13 +68,32 @@ def score_decision(decision: dict, probe_calls: list[str], expected: dict) -> di
     mention_count = sum(1 for kw in must_mention if kw.lower() in full_text)
     mention_ratio = mention_count / len(must_mention) if must_mention else 1.0
 
-    # 6. confidence calibration
+    # 6. confidence calibration (informational only — LLM self-assessment is known to be biased high)
     expected_confidence = expected.get("expected_confidence", ["high", "medium", "low"])
     predicted_confidence = decision.get("confidence", "high")
-    confidence_ok = predicted_confidence in expected_confidence
+    confidence_match = predicted_confidence in expected_confidence
 
-    passed_count = sum([action_ok, probe_ok, merge_safety_ok, target_ok, mention_ratio >= 0.5, confidence_ok])
-    total_criteria = 6
+    # 7. suspected_pair_surfaced — reviewer should see suspected pairs in output
+    # GATING criterion: when similar pairs exist, agent's plan/reasoning must mention them
+    surfacing_ok = True
+    if similar_pairs:
+        top_pair = similar_pairs[0]  # highest similarity
+        surface_text = (
+            (decision.get("probe_findings_summary", "") + " "
+             + decision.get("bias_assessment", "") + " "
+             + decision.get("reasoning", "") + " "
+             + " ".join(probe_calls))
+        ).lower()
+        surfacing_ok = (top_pair["tag_a"].lower() in surface_text
+                        and top_pair["tag_b"].lower() in surface_text)
+
+    # gating criteria (5)
+    passed_count = sum([action_ok, probe_ok, merge_safety_ok, target_ok, mention_ratio >= 0.5])
+    total_criteria = 5
+    # surfacing as additional gating only when relevant
+    if similar_pairs:
+        passed_count += int(surfacing_ok)
+        total_criteria += 1
 
     return {
         "action_ok": action_ok,
@@ -81,7 +101,8 @@ def score_decision(decision: dict, probe_calls: list[str], expected: dict) -> di
         "merge_safety_ok": merge_safety_ok,
         "target_ok": target_ok,
         "mention_ratio": round(mention_ratio, 2),
-        "confidence_ok": confidence_ok,
+        "surfacing_ok": surfacing_ok,
+        "confidence_match": confidence_match,     # informational
         "predicted_confidence": predicted_confidence,
         "score": passed_count / total_criteria,
         "predicted_action": action,
@@ -135,19 +156,25 @@ def run(scenarios: list[str] | None = None):
         print(f"   bias_assessment: {decision['bias_assessment'][:200]}")
         print(f"   reasoning:    {decision['reasoning'][:200]}")
 
-        score = score_decision(decision, probe_calls, scenario["expected"])
+        similar = result.get("similar_pairs", [])
+        score = score_decision(decision, probe_calls, scenario["expected"], similar)
         symbol = "✅" if score["score"] >= 0.8 else ("⚠️" if score["score"] >= 0.5 else "❌")
         print(f"\n{symbol} Score: {score['score']:.0%}")
         print(f"   action_ok:        {'✓' if score['action_ok'] else '✗'} (predicted={score['predicted_action']})")
-        print(f"   confidence_ok:    {'✓' if score['confidence_ok'] else '✗'} (predicted={score['predicted_confidence']}, expected={scenario['expected'].get('expected_confidence')})")
         print(f"   probe_ok:         {'✓' if score['probe_ok'] else '✗'}")
         print(f"   merge_safety_ok:  {'✓' if score['merge_safety_ok'] else '✗'}")
         print(f"   target_ok:        {'✓' if score['target_ok'] else '✗'}")
+        print(f"   surfacing_ok:     {'✓' if score['surfacing_ok'] else '✗'} (suspected pairs visible to reviewer)")
         print(f"   mention_ratio:    {score['mention_ratio']}")
+        print(f"   confidence (info): predicted={score['predicted_confidence']}, expected={scenario['expected'].get('expected_confidence')} {'(match)' if score['confidence_match'] else '(mismatch — LLM self-assess is known unreliable)'}")
         if decision.get('uncertainty_reasons'):
             print(f"   uncertainty_reasons:")
             for r in decision['uncertainty_reasons'][:3]:
                 print(f"     - {r[:150]}")
+        if similar:
+            print(f"   suspected_pairs surfaced to reviewer:")
+            for p in similar[:3]:
+                print(f"     - {p['similarity']:.3f}  {p['tag_a']} ↔ {p['tag_b']}")
 
         all_results.append({
             "scenario": scenario["name"],

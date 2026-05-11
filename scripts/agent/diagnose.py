@@ -242,26 +242,10 @@ def diagnose(vocab: list[dict], diagnostics: dict, assignments: list[dict], db_p
     if decision is None:
         raise ValueError("decide step returned None twice")
 
-    # External calibration: downgrade confidence if high but didn't merge a 0.80+ similar pair
-    decision_dict = decision.model_dump()
-    for pair in similar_pairs:
-        if pair["similarity"] >= 0.80:
-            # If agent didn't merge this pair AND confidence is high → downgrade
-            merged_this = (
-                decision.next_action == "propose_merge"
-                and pair["tag_a"].lower() in (decision.action_focus or "").lower()
-                and pair["tag_b"].lower() in (decision.action_focus or "").lower()
-            )
-            if not merged_this and decision.confidence == "high":
-                decision_dict["confidence"] = "medium"
-                decision_dict["uncertainty_reasons"] = list(decision.uncertainty_reasons) + [
-                    f"External calibration: {pair['tag_a']} ↔ {pair['tag_b']} similarity={pair['similarity']:.2f} but not merged — reviewer should verify"
-                ]
-
     return {
         "plan": plan.model_dump(),
-        "similar_pairs": similar_pairs,
+        "similar_pairs": similar_pairs,  # exposed to reviewer; no auto-downgrade
         "probe_calls": list(plan.probe_calls_needed[:3]),
         "findings": findings,
-        "decision": decision_dict,
+        "decision": decision.model_dump(),
     }
