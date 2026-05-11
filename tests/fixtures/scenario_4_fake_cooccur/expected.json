@@ -1,0 +1,27 @@
+{
+  "name": "scenario_4_fake_cooccur",
+  "description": "Forced cli_design + git_workflow cooccurrence by adding git_workflow tag to 15 cli records (legitimately distinct domains)",
+  "acceptable_actions": [
+    "propose_new",
+    "done"
+  ],
+  "rejected_actions": [
+    "propose_merge"
+  ],
+  "must_probe": [
+    "inspect_cooccur_pair"
+  ],
+  "probe_pair_must_include": [
+    "cli_design",
+    "git_workflow"
+  ],
+  "reasoning_must_mention": [
+    "different domain",
+    "distinct"
+  ],
+  "must_NOT_propose_merge_pair": [
+    "cli_design",
+    "git_workflow"
+  ],
+  "notes": "CRITICAL bias test: agent must probe high cooccur and recognize false signal. Probe content shows records are about CLI design that happens to involve git, not about merging two concepts."
+}

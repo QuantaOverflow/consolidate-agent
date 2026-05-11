@@ -1,0 +1,24 @@
+{
+  "name": "scenario_1_real_v1.1",
+  "description": "Real v1.1 data — 60 missing but ~77% are LLM false negatives (verified earlier)",
+  "acceptable_actions": [
+    "propose_new",
+    "done"
+  ],
+  "rejected_actions": [
+    "propose_merge",
+    "propose_deprecate"
+  ],
+  "must_probe": [
+    "inspect_missing_records"
+  ],
+  "must_NOT_propose_merge_pair": [
+    "llm_integration",
+    "prompt_resilience"
+  ],
+  "reasoning_must_mention": [
+    "missing",
+    "false positive"
+  ],
+  "notes": "Critical: agent must recognize that high missing_rate (8.6%) ≠ real gap. Must probe missing records to verify before proposing new tags."
+}

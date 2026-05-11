@@ -1,0 +1,525 @@
+{
+  "sample_size": 696,
+  "total_assigned": 676,
+  "total_missing": 20,
+  "tag_usage_count": {
+    "state_isolation": 86,
+    "llm_integration": 78,
+    "error_handling": 70,
+    "fallback_strategy": 61,
+    "validation_layering": 53,
+    "test_isolation": 41,
+    "schema_evolution": 40,
+    "routing_logic": 39,
+    "config_precedence": 39,
+    "refactor_safety": 36,
+    "cli_design": 36,
+    "testing_strategy": 35,
+    "type_safety": 33,
+    "state_mutation": 33,
+    "observability_design": 30,
+    "directory_structure": 30,
+    "async_execution": 28,
+    "documentation_fidelity": 28,
+    "prompt_resilience": 28,
+    "git_workflow": 26,
+    "tool_usage_patterns": 25,
+    "browser_automation": 24,
+    "interrupt_recovery": 24,
+    "commit_messaging": 24,
+    "persistence_consistency": 23,
+    "concurrency_safety": 21,
+    "skill_system_design": 21,
+    "dependency_management": 21,
+    "ui_rendering": 20,
+    "early_termination": 19,
+    "date_handling": 19,
+    "http_protocol": 17,
+    "mocking_fidelity": 13,
+    "pagination_strategy": 12,
+    "cache_consistency": 12,
+    "network_security": 11,
+    "prompt_design": 11,
+    "streaming_behavior": 10,
+    "encoding_handling": 9,
+    "regex_parsing": 9,
+    "permission_control": 8,
+    "jsonp_handling": 7,
+    "credential_security": 7,
+    "event_driven_architecture": 6,
+    "symlink_handling": 3
+  },
+  "unused_tags": [],
+  "missing_records": [
+    {
+      "record_id": "knowledge_685c4414bbc9",
+      "title": "Field whitelisting prevents unintended data leakage in summary construction",
+      "missing_concept": ""
+    },
+    {
+      "record_id": "knowledge_e6d4b82c0601",
+      "title": "DerivedView must be used alongside existing hydrate_meta_data in migration",
+      "missing_concept": ""
+    },
+    {
+      "record_id": "knowledge_ed9729cc6585",
+      "title": "MCP service is not automatically implied by HTTP API presence",
+      "missing_concept": ""
+    },
+    {
+      "record_id": "knowledge_5354d3296209",
+      "title": "Consul KV key naming reflects logical grouping, not filesystem hierarchy",
+      "missing_concept": ""
+    },
+    {
+      "record_id": "knowledge_4432681a78a5",
+      "title": "LLM call retry wrappers should be synchronous and exponential",
+      "missing_concept": ""
+    },
+    {
+      "record_id": "knowledge_b41c30567e94",
+      "title": "Specification is the critical bridge between natural language and testable behavior",
+      "missing_concept": "specification_fidelity: the practice of deriving testable, boundary-aware behavioral rules from ambiguous natural-language requirements — not present in vocab"
+    },
+    {
+      "record_id": "knowledge_ce32fbf1e208",
+      "title": "预筛选截断参数需与分析目标对齐",
+      "missing_concept": "text_truncation_strategy: deliberate alignment of pre-filtering truncation (e.g., char limits, comment counts) with analytical goals like event recall — not covered by existing tags"
+    },
+    {
+      "record_id": "knowledge_b2a613b03b46",
+      "title": "回退或更新插件版本不等于运行版本变更",
+      "missing_concept": "runtime_version_validation: verifying that the *loaded* plugin/extension version matches the expected one at runtime (e.g., via process inspection), distinct from build-time or package-manager versioning"
+    },
+    {
+      "record_id": "knowledge_91da588f6cf0",
+      "title": "PageAjax + clist is more reliable than baostock/THS for sector mapping",
+      "missing_concept": "data_source_reliability"
+    },
+    {
+      "record_id": "knowledge_463ae5751e8f",
+      "title": "Data source consistency trumps theoretical availability",
+      "missing_concept": "data_source_consistency"
+    },
+    {
+      "record_id": "knowledge_bbd771d575f6",
+      "title": "HTML fragment injection via &lt;body&gt; extraction",
+      "missing_concept": "html_fragment_injection"
+    },
+    {
+      "record_id": "knowledge_3e320d342697",
+      "title": "Cosine similarity search should reuse existing embedding retrieval patterns",
+      "missing_concept": "Consistency patterns for reusing logic across similar operations (e.g., embedding retrieval)"
+    },
+    {
+      "record_id": "knowledge_b3d064070c44",
+      "title": "Backend field filtering requires explicit model/schema changes",
+      "missing_concept": "backend_validation"
+    },
+    {
+      "record_id": "knowledge_d3ec6a3f183d",
+      "title": "Codex插件必须包含.plugin.json清单文件",
+      "missing_concept": "plugin_architecture"
+    },
+    {
+      "record_id": "knowledge_5a6a0ae41cd1",
+      "title": "Hot-path schema validation should be avoided in CRUD methods when schema is guaranteed at init",
+      "missing_concept": "performance_optimization"
+    },
+    {
+      "record_id": "knowledge_df9cad451a82",
+      "title": "Telegram bot message editing must throttle edits to avoid BadRequest",
+      "missing_concept": "rate_limiting"
+    },
+    {
+      "record_id": "knowledge_1ac833182720",
+      "title": "Migration strategy must be declared before implementation",
+      "missing_concept": "migration_strategy"
+    },
+    {
+      "record_id": "knowledge_b1157c951433",
+      "title": "Plugin systems can be purely declarative",
+      "missing_concept": "plugin_system_design"
+    },
+    {
+      "record_id": "knowledge_2134006a9218",
+      "title": "Environment variable loading must be explicit in CLI entrypoints",
+      "missing_concept": "environment_variable_loading"
+    },
+    {
+      "record_id": "knowledge_74010f3cce97",
+      "title": "Recall@k evaluation requires exact turn index matching, not semantic similarity",
+      "missing_concept": "evaluation_metrics"
+    }
+  ],
+  "low_confidence_records": [
+    {
+      "record_id": "knowledge_982e3c100371",
+      "title": "Akshare's spot_em interfaces return aggregate metrics, not per-item tables",
+      "selected": [
+        {
+          "name": "schema_evolution",
+          "confidence": "low"
+        },
+        {
+          "name": "type_safety",
+          "confidence": "medium"
+        }
+      ],
+      "reason": "While not about schema change over time, the confusion stems from mismatched expectations of data shape (aggregate vs. tabular); 'type_safety' fits better as it highlights the need for runtime shape enforcement and clear contract documentation."
+    },
+    {
+      "record_id": "knowledge_14b203b44cc0",
+      "title": "WindowServer is macOS's compositing service, not Windows Server",
+      "selected": [
+        {
+          "name": "browser_automation",
+          "confidence": "low"
+        },
+        {
+          "name": "ui_rendering",
+          "confidence": "high"
+        }
+      ],
+      "reason": "The record discusses macOS WindowServer as a graphics compositor handling window rendering and animations—core UI rendering concerns—not browser automation."
+    },
+    {
+      "record_id": "knowledge_2eeeb7d533ea",
+      "title": "Module-level constant for thread pool size improves maintainability",
+      "selected": [
+        {
+          "name": "config_precedence",
+          "confidence": "low"
+        },
+        {
+          "name": "refactor_safety",
+          "confidence": "medium"
+        }
+      ],
+      "reason": "'refactor_safety' fits best: naming the constant improves grep/IDE discoverability and prevents missed updates during refactors; 'config_precedence' is weak—it’s not about config source hierarchy but about making a hardcoded value maintainable. No better tag exists, so 'config_precedence' is included at low confidence."
+    },
+    {
+      "record_id": "knowledge_90b55c95171d",
+      "title": "Staged changes must be validated before commit",
+      "selected": [
+        {
+          "name": "test_isolation",
+          "confidence": "low"
+        },
+        {
+          "name": "error_handling",
+          "confidence": "high"
+        }
+      ],
+      "reason": "Pre-commit validation of staged changes guards against unintended modifications like unsafe parameter reductions — this is primarily error_handling (preventing semantic failure), with weak test_isolation overlap (ensuring clean state before commit)."
+    },
+    {
+      "record_id": "knowledge_cfcece66ebab",
+      "title": "MySQL connection loss during SHOW DATABASES indicates server-level unavailability",
+      "selected": [
+        {
+          "name": "http_protocol",
+          "confidence": "low"
+        },
+        {
+          "name": "error_handling",
+          "confidence": "medium"
+        }
+      ],
+      "reason": "While MySQL-specific, the key insight is interpreting error semantics to diagnose root cause (server-level unavailability vs. query-level failure) — aligning with error_handling's focus on classifying and responding to failures meaningfully; http_protocol is a weak fit due to superficial protocol-layer reasoning, but no database-specific tag exists."
+    }
+  ],
+  "boundary_blur_records": [
+    {
+      "record_id": "knowledge_b6b32db3bd24",
+      "title": "Field name mismatches between LLM output schema and persistence schema cause silent data loss"
+    },
+    {
+      "record_id": "knowledge_50ca67ffedaa",
+      "title": "JSONP bypasses CORS by exploiting script tag loading"
+    },
+    {
+      "record_id": "knowledge_9b63e87376a4",
+      "title": "Date-based pagination requires explicit early-termination logic"
+    },
+    {
+      "record_id": "knowledge_558c85575213",
+      "title": "Shared state is the communication primitive in LangGraph agent loops"
+    },
+    {
+      "record_id": "knowledge_028ff3524d95",
+      "title": "Tool calling protocol requires strict message pairing"
+    },
+    {
+      "record_id": "knowledge_3c9322b898a8",
+      "title": "System prompt constants should be extracted into a dedicated prompts module with composition logic"
+    },
+    {
+      "record_id": "knowledge_e67e0426f76b",
+      "title": "LLM node JSON parsing failure causes fallback to template text"
+    },
+    {
+      "record_id": "knowledge_bf9041875bf2",
+      "title": "Persistent output format differs from runtime state format"
+    },
+    {
+      "record_id": "knowledge_c5c7233ef569",
+      "title": "Tool selection prompt must mirror both the VALID_TOOLS set and the actual dispatch logic"
+    },
+    {
+      "record_id": "knowledge_836290ec5638",
+      "title": "HTTP client environment variables can break local service calls"
+    },
+    {
+      "record_id": "knowledge_c9afc396d82c",
+      "title": "Conventional Commits message drafting requires staged-diff context to infer type and scope"
+    },
+    {
+      "record_id": "knowledge_175d82f5c8fb",
+      "title": "Stream chunk parsing must prioritize tool_call_chunks over content"
+    },
+    {
+      "record_id": "knowledge_fc080853935d",
+      "title": "Login state detection must distinguish 'explicitly unlogged' from 'detection failure'"
+    },
+    {
+      "record_id": "knowledge_2b4cb0b89a24",
+      "title": "HITL must be event-driven, not terminal-blocking"
+    },
+    {
+      "record_id": "knowledge_03a77ad35f6c",
+      "title": "日志风暴是高频错误循环触发的持续计算+写盘任务"
+    },
+    {
+      "record_id": "knowledge_ee503175b220",
+      "title": "LangGraph 并行节点需显式状态 schema 避免并发写冲突"
+    },
+    {
+      "record_id": "knowledge_3cc185c5cb42",
+      "title": "SSE endpoint duplication requires strict structural mirroring"
+    },
+    {
+      "record_id": "knowledge_d91a00c87c8d",
+      "title": "trust_env=False bypasses system proxy inheritance but not TUN interception"
+    },
+    {
+      "record_id": "knowledge_d920f81ac08e",
+      "title": "Extension error storms can dominate CPU without visible file I/O or network activity"
+    },
+    {
+      "record_id": "knowledge_35e7f693308d",
+      "title": "Tool return format must match LLM's expectation for date-aware fallback"
+    },
+    {
+      "record_id": "knowledge_24cfce4c9d4e",
+      "title": "Test isolation requires stubbing at the import layer, not just the call layer"
+    },
+    {
+      "record_id": "knowledge_5f14e3bd7a36",
+      "title": "LLM tool loops must handle both tool_calls and content-based structured responses"
+    },
+    {
+      "record_id": "knowledge_c4136aa4b597",
+      "title": "Plugin name derivation requires cross-referencing plugin.json and directory structure"
+    },
+    {
+      "record_id": "knowledge_e3cd43df5268",
+      "title": "WAF detection must distinguish JS challenge from UI-based verification"
+    },
+    {
+      "record_id": "knowledge_4e35eea07b97",
+      "title": "Boundary test assertions should reflect actual behavior, not idealized expectations"
+    },
+    {
+      "record_id": "knowledge_bf4b77e96179",
+      "title": "Conventional Commits message drafting requires staged-diff context, not working-tree inspection"
+    },
+    {
+      "record_id": "knowledge_cd713ceacb91",
+      "title": "Field filtering is distinguishable from transient signature drift"
+    },
+    {
+      "record_id": "knowledge_001f123aebb6",
+      "title": "Thread-local session context for shared agent"
+    },
+    {
+      "record_id": "knowledge_1dc484e187b5",
+      "title": "Early termination in paginated APIs must tolerate non-monotonic ordering"
+    },
+    {
+      "record_id": "knowledge_45158126087b",
+      "title": "Gap detection in reflective search agents relies on shallow, heuristic signals—not semantic analysis"
+    },
+    {
+      "record_id": "knowledge_50dc0e3556eb",
+      "title": "Windowed scanning loops must avoid premature termination on empty windows"
+    },
+    {
+      "record_id": "knowledge_06b9cdbace46",
+      "title": "File-first design is a valid exploration-phase compromise"
+    },
+    {
+      "record_id": "knowledge_1adf13233971",
+      "title": "Staged change summarization must triage by risk and coherence, not just line count"
+    },
+    {
+      "record_id": "knowledge_12b3e60874a2",
+      "title": "Fixture-driven test development requires proactive gap analysis against test strategy"
+    },
+    {
+      "record_id": "knowledge_90640dd3e6e9",
+      "title": "Test coverage validates behavioral equivalence after refactoring, not just structural correctness"
+    },
+    {
+      "record_id": "knowledge_2d833b2c2edf",
+      "title": "Status-based counting should exclude 'skipped' from both ok_count and failed_count"
+    },
+    {
+      "record_id": "knowledge_7d9226a301d4",
+      "title": "Dynamic content lists via import.meta.glob in Astro"
+    },
+    {
+      "record_id": "knowledge_19e24948d9a3",
+      "title": "Toolchain inference requires cross-referencing multiple config and source files"
+    },
+    {
+      "record_id": "knowledge_a224deb98513",
+      "title": "ProcessedIndex hash can be lightweight but must be stable across runs"
+    },
+    {
+      "record_id": "knowledge_3b922876663a",
+      "title": "Cross-type coordination logic belongs outside single-concern vector stores"
+    },
+    {
+      "record_id": "knowledge_9402a2312463",
+      "title": "Conventional Commits workflow enforces staged-diff awareness before message drafting"
+    },
+    {
+      "record_id": "knowledge_4ec9c54c4a04",
+      "title": "SimpleNamespace is sufficient for argparse-style function adaptation"
+    },
+    {
+      "record_id": "knowledge_8ccb4089dcb8",
+      "title": "Testing streaming behavior requires mocking at the HTTP transport layer—not the agent layer"
+    },
+    {
+      "record_id": "knowledge_81f334192fbd",
+      "title": "Global registration lists require duplicate protection"
+    },
+    {
+      "record_id": "knowledge_0791d07cebba",
+      "title": "Search for config keys requires both literal string matching and semantic context awareness"
+    },
+    {
+      "record_id": "knowledge_5bd6d20de0fd",
+      "title": "Project-level skills require explicit directory placement and reload, not just file existence"
+    }
+  ],
+  "top_cooccurrence_pairs": [
+    {
+      "pair": [
+        "error_handling",
+        "fallback_strategy"
+      ],
+      "count": 13
+    },
+    {
+      "pair": [
+        "llm_integration",
+        "prompt_resilience"
+      ],
+      "count": 12
+    },
+    {
+      "pair": [
+        "llm_integration",
+        "tool_usage_patterns"
+      ],
+      "count": 11
+    },
+    {
+      "pair": [
+        "llm_integration",
+        "state_isolation"
+      ],
+      "count": 11
+    },
+    {
+      "pair": [
+        "fallback_strategy",
+        "state_isolation"
+      ],
+      "count": 11
+    },
+    {
+      "pair": [
+        "type_safety",
+        "validation_layering"
+      ],
+      "count": 10
+    },
+    {
+      "pair": [
+        "fallback_strategy",
+        "llm_integration"
+      ],
+      "count": 10
+    },
+    {
+      "pair": [
+        "commit_messaging",
+        "git_workflow"
+      ],
+      "count": 10
+    },
+    {
+      "pair": [
+        "test_isolation",
+        "testing_strategy"
+      ],
+      "count": 9
+    },
+    {
+      "pair": [
+        "state_isolation",
+        "state_mutation"
+      ],
+      "count": 8
+    },
+    {
+      "pair": [
+        "dependency_management",
+        "refactor_safety"
+      ],
+      "count": 8
+    },
+    {
+      "pair": [
+        "routing_logic",
+        "state_isolation"
+      ],
+      "count": 8
+    },
+    {
+      "pair": [
+        "directory_structure",
+        "skill_system_design"
+      ],
+      "count": 7
+    },
+    {
+      "pair": [
+        "async_execution",
+        "concurrency_safety"
+      ],
+      "count": 6
+    },
+    {
+      "pair": [
+        "persistence_consistency",
+        "schema_evolution"
+      ],
+      "count": 6
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "name": "scenario_2_unused_tag",
+  "description": "Added fake niche tag with 0 records in assignments",
+  "acceptable_actions": [
+    "propose_deprecate"
+  ],
+  "rejected_actions": [
+    "propose_new",
+    "propose_merge",
+    "done"
+  ],
+  "must_probe": [
+    "inspect_tag"
+  ],
+  "probe_target_must_include": "obscure_xml_quirk",
+  "reasoning_must_mention": [
+    "obscure_xml_quirk",
+    "unused"
+  ],
+  "notes": "Trivial: unused_tags signal clear. Agent should immediately recognize and act."
+}

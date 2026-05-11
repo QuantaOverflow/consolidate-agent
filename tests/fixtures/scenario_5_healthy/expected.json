@@ -1,0 +1,18 @@
+{
+  "name": "scenario_5_healthy",
+  "description": "Synthetic healthy state: hit_rate ~97%, missing=20, no unused, no extreme cooccur",
+  "acceptable_actions": [
+    "done"
+  ],
+  "rejected_actions": [
+    "propose_new",
+    "propose_merge",
+    "propose_deprecate"
+  ],
+  "must_probe": [],
+  "reasoning_must_mention": [
+    "healthy",
+    "no strong signal"
+  ],
+  "notes": "Knows when to stop: doesn't manufacture work when vocab is in good shape."
+}

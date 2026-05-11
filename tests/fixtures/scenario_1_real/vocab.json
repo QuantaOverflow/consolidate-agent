@@ -1,0 +1,186 @@
+{
+  "vocab": [
+    {
+      "name": "early_termination",
+      "definition": "Strategies that halt execution before completion to prevent resource exhaustion, infinite loops, or invalid state propagation, especially in iterative, paginated, or recursive contexts."
+    },
+    {
+      "name": "fallback_strategy",
+      "definition": "Mechanisms that provide graceful degradation when primary logic fails, including structured alternatives for parsing, tool selection, data retrieval, or output generation."
+    },
+    {
+      "name": "schema_evolution",
+      "definition": "Patterns for managing changes to data contracts over time, including backward/forward compatibility, field deprecation, migration coordination, and fallback retention."
+    },
+    {
+      "name": "state_isolation",
+      "definition": "Techniques to prevent unintended coupling between components by scoping, namespacing, or explicitly controlling shared state access and mutation."
+    },
+    {
+      "name": "config_precedence",
+      "definition": "Rules governing how configuration values from different sources (e.g., env vars, files, CLI flags) override each other in hierarchical, deterministic order."
+    },
+    {
+      "name": "prompt_resilience",
+      "definition": "Design practices that make LLM interactions robust against inconsistencies, such as strict JSON output, few-shot validation, role framing, and reflection anchoring."
+    },
+    {
+      "name": "concurrency_safety",
+      "definition": "Guards against race conditions and corruption in multi-threaded or async contexts, including thread-local resources, atomic writes, and explicit conflict resolution."
+    },
+    {
+      "name": "test_isolation",
+      "definition": "Practices ensuring tests execute independently, including fixture scoping, mock cleanup, per-test cache invalidation, and environment separation."
+    },
+    {
+      "name": "error_handling",
+      "definition": "Strategies for detecting, classifying, and responding to failures—including silent vs. explicit, transient vs. semantic, and partial vs. total—without masking root causes."
+    },
+    {
+      "name": "routing_logic",
+      "definition": "Control-flow decisions based on explicit signals (e.g., boolean flags, stage metadata) rather than implicit heuristics, ensuring predictable node or workflow dispatch."
+    },
+    {
+      "name": "persistence_consistency",
+      "definition": "Ensuring data written to persistent stores matches runtime state and schema expectations, including whitelisting, idempotence, and integrity validation."
+    },
+    {
+      "name": "directory_structure",
+      "definition": "Using filesystem layout intentionally to signal architecture, ownership, boundaries, and discoverability—e.g., via numeric prefixes, neutral containment, or symbolic links."
+    },
+    {
+      "name": "credential_security",
+      "definition": "Safe handling of sensitive auth material, including escaping, externalization, non-versioning, and avoiding insecure passing in constrained contexts."
+    },
+    {
+      "name": "streaming_behavior",
+      "definition": "Design and validation patterns for incremental data delivery, including chunk parsing priority, disconnection handling, format consistency, and transport-layer mocking."
+    },
+    {
+      "name": "type_safety",
+      "definition": "Enforcing correct data shapes at boundaries using static annotations, runtime checks, coercion, and explicit null handling—not truthiness or implicit defaults."
+    },
+    {
+      "name": "validation_layering",
+      "definition": "Applying multiple tiers of validation—fast pre-filtering followed by authoritative gatekeeping—to balance performance and correctness."
+    },
+    {
+      "name": "observability_design",
+      "definition": "Structuring telemetry for debuggability and insight, including lightweight event annotations, structured logging, trace boundaries, and failure attribution."
+    },
+    {
+      "name": "cli_design",
+      "definition": "Patterns for command-line interfaces including mutual exclusion, subcommand segregation, path normalization, health-check fallbacks, and parameter scoping."
+    },
+    {
+      "name": "llm_integration",
+      "definition": "Engineering practices for reliable LLM interaction, covering tool calling protocols, response parsing, output constraints, integration testing, and non-determinism management."
+    },
+    {
+      "name": "git_workflow",
+      "definition": "Principles for safe, observable version control usage, including staged-diff semantics, fast-forward safety, merge strategy coordination, and commit message grounding."
+    },
+    {
+      "name": "browser_automation",
+      "definition": "Techniques for robust web interaction, including context reuse, login-state detection, DOM-based signals, WAF challenge handling, and page reference management."
+    },
+    {
+      "name": "event_driven_architecture",
+      "definition": "Architectural patterns where events serve as the canonical source of truth, enabling state derivation, decoupling, and immutable reduction instead of mutable caching."
+    },
+    {
+      "name": "tool_usage_patterns",
+      "definition": "Patterns governing how LLM tools are registered, invoked, and validated, including registration-time validation, static schemas, synchronous RPC expectations, and capability-grounded policy enforcement."
+    },
+    {
+      "name": "documentation_fidelity",
+      "definition": "Ensuring docs reflect actual implementation, structure, and behavior—not assumptions—via empirical inspection, artifact mapping, and active discovery before execution."
+    },
+    {
+      "name": "pagination_strategy",
+      "definition": "Robust approaches for iterating over paged data, including defensive termination heuristics, date-bound inspection, offset drift prevention, and intermediate checkpointing."
+    },
+    {
+      "name": "date_handling",
+      "definition": "Consistent treatment of temporal data across pipelines, including normalization, timezone-aware filtering, string-based extraction, and semantic propagation."
+    },
+    {
+      "name": "mocking_fidelity",
+      "definition": "Creating test doubles that mirror real behavior precisely—including signatures, side effects, error modes, and concurrency contracts—to avoid false confidence."
+    },
+    {
+      "name": "dependency_management",
+      "definition": "Strategies for managing package and module dependencies, including version alignment, optional import deferral, circular dependency resolution, and marker-based filtering."
+    },
+    {
+      "name": "network_security",
+      "definition": "Security controls for networked systems, including filesystem path whitelisting, DNS verification, WAF telemetry, and TUN-mode routing constraints."
+    },
+    {
+      "name": "ui_rendering",
+      "definition": "Frontend rendering patterns ensuring correctness and adaptability, including full-width escape, responsive container constraints, dynamic styling, and static placeholder use."
+    },
+    {
+      "name": "regex_parsing",
+      "definition": "Safe and precise use of regular expressions, including boundary control, escaping context awareness, structural anchoring, and avoiding nesting fragility."
+    },
+    {
+      "name": "jsonp_handling",
+      "definition": "Correct processing of JSONP responses, requiring explicit prefix/suffix stripping before JSON parsing to handle non-standard wire format."
+    },
+    {
+      "name": "symlink_handling",
+      "definition": "Understanding and leveraging symbolic links—including fragility to target relocation, textual path resolution, and filesystem metadata identification—for safe reorganization."
+    },
+    {
+      "name": "commit_messaging",
+      "definition": "Practices for writing meaningful commit messages including Conventional Commits format, scope inference from cohesion, breaking-change syntax, and grounding messages in staged diffs."
+    },
+    {
+      "name": "interrupt_recovery",
+      "definition": "Designing for human-in-the-loop or process interruption with durable, versioned, granular checkpoints, exact context restoration, and source-specific protocols."
+    },
+    {
+      "name": "cache_consistency",
+      "definition": "Ensuring cached data remains valid and aligned with source-of-truth, including monotonic metadata, TTL bypass prevention, and cold-start concurrency guards."
+    },
+    {
+      "name": "http_protocol",
+      "definition": "Correct interpretation and usage of HTTP semantics, including status code layering (auth vs. authz), payload structure expectations, and CORS circumvention mechanisms."
+    },
+    {
+      "name": "async_execution",
+      "definition": "Safe and efficient use of asynchronous programming, including event loop binding, offloading blocking I/O, exception suppression per item, and dispatcher segregation."
+    },
+    {
+      "name": "prompt_design",
+      "definition": "Crafting prompts for reliability, including minimal inputs, negative constraints, Mermaid parser compatibility, and separating protocol from implementation details."
+    },
+    {
+      "name": "state_mutation",
+      "definition": "Safe and intentional modification of shared state, including explicit reset per unit, safe dictionary access, accumulator reducer definitions, and granularity alignment with recovery units."
+    },
+    {
+      "name": "skill_system_design",
+      "definition": "Designing skill- or agent-based systems for end-to-end coherence via automated synchronization, centralized directory structures, and clear deliverable vs. artifact distinction."
+    },
+    {
+      "name": "testing_strategy",
+      "definition": "Systematic approaches to test design and validation, including behavioral contract alignment, hybrid regression, specification evolution, and change-driven scope minimization."
+    },
+    {
+      "name": "encoding_handling",
+      "definition": "Correct handling of byte/string conversions, character encoding (UTF-8 etc.), and serialization format semantics — especially at API boundaries returning bytes vs strings."
+    },
+    {
+      "name": "permission_control",
+      "definition": "Authorization and access control patterns including endpoint-based permission checks, model permission grants, API key scoping, and bypass risks in invocation paths."
+    },
+    {
+      "name": "refactor_safety",
+      "definition": "Practices ensuring refactors (rename, move, signature change, file split) propagate correctly across files via call-site auditing, import validation, and cross-file symbol verification."
+    }
+  ],
+  "notes": "Clustering 696 themes into a clean, rule-compliant tag vocabulary. Key challenges: (1) Aggressively merging synonyms (e.g., 'early_termination', 'premature_stop', 'force_regeneration_logic' → 'early_termination'); (2) Avoiding platform names (e.g., no 'langgraph', 'playwright'); (3) Ensuring every tag has ≥2 themes — all 696 are assigned; (4) Maintaining abstraction level: tags like 'state_isolation' and 'schema_evolution' capture cross-cutting patterns, not specific tools or scenarios. Final vocab contains 42 tags, all with 2–32 themes. High-coverage tags include 'fallback_strategy' (32), 'schema_evolution' (28), 'state_isolation' (25), 'early_termination' (22), 'config_precedence' (18), 'prompt_resilience' (17), 'concurrency_safety' (16), 'test_isolation' (15), 'error_handling' (14), 'routing_logic' (13), 'persistence_consistency' (12), 'directory_structure' (11), 'credential_security' (10), 'streaming_behavior' (10), 'type_safety' (10), 'validation_layering' (9), 'observability_design' (9), 'cli_design' (9), 'llm_integration' (9), 'git_workflow' (8), 'browser_automation' (8), 'event_driven_arch' (8), 'tool_contract' (8), 'documentation_fidelity' (7), 'pagination_strategy' (7), 'date_handling' (7), 'mocking_fidelity' (7), 'dependency_management' (6), 'network_security' (6), 'ui_rendering' (6), 'regex_parsing' (5), 'jsonp_handling' (4), 'symbolic_link_behavior' (4), 'convention_compliance' (4), 'interrupt_recovery' (4), 'cache_consistency' (4), 'http_protocol' (4), 'async_execution' (4), 'prompt_design' (4), 'state_mutation' (4), 'workflow_coherence' (4), 'testing_strategy' (4). No singleton tags; all themes assigned. [v1.1 changes: renamed 5 (event_driven_arch→event_driven_architecture, symbolic_link_behavior→symlink_handling, convention_compliance→commit_messaging, tool_contract→tool_usage_patterns, workflow_coherence→skill_system_design); added 3 (encoding_handling, permission_control, refactor_safety)]",
+  "theme_count": 696
+}

@@ -1,0 +1,26 @@
+{
+  "name": "scenario_3_split_synonym",
+  "description": "Injected state_namespacing as near-synonym of state_isolation, 50% records moved",
+  "acceptable_actions": [
+    "propose_merge"
+  ],
+  "rejected_actions": [
+    "propose_deprecate",
+    "done"
+  ],
+  "must_probe": [
+    "inspect_cooccur_pair",
+    "compare_tag_records",
+    "inspect_tag"
+  ],
+  "probe_pair_must_include": [
+    "state_isolation",
+    "state_namespacing"
+  ],
+  "reasoning_must_mention": [
+    "state_isolation",
+    "state_namespacing",
+    "synonym"
+  ],
+  "notes": "Detecting near-synonym requires probing — defs alone don't make it obvious."
+}
