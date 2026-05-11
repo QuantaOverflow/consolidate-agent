@@ -141,6 +141,64 @@ def judge_pair(
     return result
 
 
+def propose_merge_fn(
+    vocab: list[dict],
+    assignments: list[dict],
+    focus: str = "",
+    *,
+    db_path: Path | None = None,
+    top_k: int = 10,
+    min_cooccur: int = 5,
+    max_evidence: int = 5,
+):
+    """In-memory propose_merge for agent loop.
+
+    Returns list of MergeProposal objects (from scripts/agent/apply.py).
+    focus is currently advisory — embedded in prompt for context but doesn't
+    change candidate selection.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent / "agent"))
+    from apply import MergeProposal as _MergeProposal
+
+    settings = Settings()
+    model = _chat_model(settings).with_structured_output(MergeJudgement)
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", SYSTEM_PROMPT + (f"\n\nFOCUS HINT: {focus}" if focus else "")),
+        ("user", USER_PROMPT),
+    ])
+
+    vocab_by_name = {t["name"]: t for t in vocab}
+    pair_counts, tag_record_ids, tag_usage = compute_cooccurrence(assignments)
+    candidates = [(p, c) for p, c in pair_counts.most_common(top_k * 2) if c >= min_cooccur][:top_k]
+
+    proposals: list = []
+    for pair, count in candidates:
+        a_name, b_name = pair
+        if a_name not in vocab_by_name or b_name not in vocab_by_name:
+            continue
+        shared = list(tag_record_ids[a_name] & tag_record_ids[b_name])[:max_evidence]
+        details = load_record_details(db_path, shared) if db_path else {}
+        evidence_records = [details[rid] for rid in shared if rid in details]
+
+        result = judge_pair(
+            model, prompt,
+            vocab_by_name[a_name], vocab_by_name[b_name],
+            tag_usage, count, evidence_records,
+        )
+        if result is None or result.decision != "merge":
+            continue
+        if not result.keep_tag or not result.discard_tag:
+            continue
+        if result.keep_tag == result.discard_tag:
+            continue
+        if result.keep_tag not in vocab_by_name or result.discard_tag not in vocab_by_name:
+            continue
+        proposals.append(_MergeProposal(keep_tag=result.keep_tag, discard_tag=result.discard_tag))
+
+    return proposals
+
+
 def run(
     vocab_path: Path,
     assignments_path: Path,

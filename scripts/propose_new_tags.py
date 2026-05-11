@@ -173,6 +173,85 @@ def synthesize_with_vocab(model_factory, themes: list[dict], vocab: list[dict]) 
     return result
 
 
+def propose_new_fn(
+    vocab: list[dict],
+    assignments: list[dict],
+    focus: str = "",
+    *,
+    db_path: Path | None = None,
+    batch_size: int = 30,
+):
+    """In-memory propose_new for agent loop.
+
+    Pipeline: missing records → distill → synthesize-with-vocab → NewTagProposal list.
+    focus is appended to synthesize prompt to guide candidate generation.
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent / "agent"))
+    from apply import NewTagProposal as _NewTagProposal
+
+    settings = Settings()
+    def model_factory():
+        return _chat_model(settings)
+
+    # Load missing records' titles + insights from db
+    missing_ids = [a["record_id"] for a in assignments if a.get("missing")]
+    if not missing_ids or db_path is None:
+        return []
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    placeholders = ",".join("?" * len(missing_ids))
+    rows = conn.execute(
+        f"SELECT record_id, title, insight FROM source_knowledge_records WHERE record_id IN ({placeholders})",
+        missing_ids,
+    ).fetchall()
+    conn.close()
+    missing = [{"record_id": r["record_id"], "title": r["title"], "insight": r["insight"]} for r in rows]
+
+    if not missing:
+        return []
+
+    # Step 1: distill (in-memory, no cache)
+    themes = distill_records(model_factory, missing, batch_size)
+
+    # Step 2: synthesize with focus hint
+    syn_model = model_factory().with_structured_output(SynthesisWithVocabOutput)
+    sys_prompt_with_focus = SYNTHESIZE_VOCAB_SYSTEM
+    if focus:
+        sys_prompt_with_focus = SYNTHESIZE_VOCAB_SYSTEM + f"\n\nFOCUS HINT (agent guidance): {focus}"
+    syn_prompt = ChatPromptTemplate.from_messages([
+        ("system", sys_prompt_with_focus),
+        ("user", SYNTHESIZE_VOCAB_USER),
+    ])
+    theme_texts = [t["theme"] for t in themes]
+    messages = syn_prompt.invoke({
+        "vocab_count": len(vocab),
+        "vocab": format_vocab(vocab),
+        "theme_count": len(theme_texts),
+        "themes": format_themes(theme_texts),
+    })
+    result = syn_model.invoke(messages)
+    if result is None:
+        result = syn_model.invoke(messages)  # retry
+    if result is None:
+        return []
+
+    # validate + dedupe against existing vocab
+    vocab_names = {t["name"] for t in vocab}
+    proposals: list = []
+    seen: set[str] = set()
+    for cand in result.new_tags:
+        if not cand.name or cand.name in vocab_names or cand.name in seen:
+            continue
+        if cand.support_count < 2:
+            continue
+        seen.add(cand.name)
+        proposals.append(_NewTagProposal(name=cand.name, definition=cand.definition))
+
+    return proposals
+
+
 def run(
     assignments_path: Path,
     db_path: Path,

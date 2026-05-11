@@ -94,7 +94,12 @@ tag size distribution (bottom 5, excluding 0):
 ## Suspected redundancy pairs (high definition similarity — may indicate near-synonyms)
 {similar_pairs}
 
-Plan probes to verify suspicious signals. Pay attention to suspected redundancy pairs — if any pair has high def similarity, probe it before deciding action."""
+## Already-tried actions (BLOCKED — do NOT pick again unless vocab has changed since)
+{blocked_actions}
+
+Plan probes to verify suspicious signals. Pay attention to suspected redundancy pairs — if any pair has high def similarity, probe it before deciding action.
+
+If your preferred action is in the blocked list, pick a different action or 'done'. Re-picking a blocked action wastes the iteration."""
 
 
 DECIDE_SYSTEM = """You are now deciding the next action based on probe findings.
@@ -186,7 +191,13 @@ def _similar_pairs_str(pairs: list[dict]) -> str:
     return "\n".join(f"  {p['similarity']:.3f}  {p['tag_a']} ↔ {p['tag_b']}" for p in pairs)
 
 
-def diagnose(vocab: list[dict], diagnostics: dict, assignments: list[dict], db_path: Path) -> dict:
+def diagnose(
+    vocab: list[dict],
+    diagnostics: dict,
+    assignments: list[dict],
+    db_path: Path,
+    blocked_actions: list[str] | None = None,
+) -> dict:
     settings = Settings()
     plan_model = _chat_model(settings).with_structured_output(PlanOutput)
     decide_model = _chat_model(settings).with_structured_output(DiagnosticDecision)
@@ -200,6 +211,7 @@ def diagnose(vocab: list[dict], diagnostics: dict, assignments: list[dict], db_p
 
     # Pre-compute suspected redundancy pairs via def cosine similarity
     similar_pairs = find_similar_pairs(vocab, threshold=0.80, top_n=5)
+    blocked_str = ", ".join(blocked_actions) if blocked_actions else "(none)"
 
     # Step 1: plan
     plan_msg = plan_prompt.invoke({
@@ -214,6 +226,7 @@ def diagnose(vocab: list[dict], diagnostics: dict, assignments: list[dict], db_p
         "top_usage": _top_usage_str(diagnostics["tag_usage_count"]),
         "bottom_usage": _bottom_usage_str(diagnostics["tag_usage_count"]),
         "similar_pairs": _similar_pairs_str(similar_pairs),
+        "blocked_actions": blocked_str,
     })
     plan: PlanOutput | None = plan_model.invoke(plan_msg)
     if plan is None:

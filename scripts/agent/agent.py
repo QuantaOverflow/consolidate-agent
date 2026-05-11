@@ -113,8 +113,13 @@ class Agent:
                                   hit_rate_before=_hit_rate(state.diagnostics))
 
             try:
-                # Diagnose
-                diag_result = self.diagnose_fn(state.vocab, state.diagnostics, state.assignments)
+                # Diagnose — pass blocked_actions so LLM avoids repeating choices
+                diag_result = self.diagnose_fn(
+                    state.vocab,
+                    state.diagnostics,
+                    state.assignments,
+                    blocked_actions=sorted(state.blocked_actions),
+                )
                 decision = diag_result.get("decision") if isinstance(diag_result, dict) and "decision" in diag_result else diag_result
                 rec.decision = decision
 

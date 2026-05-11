@@ -145,6 +145,62 @@ def judge_tag(
     return result
 
 
+def propose_deprecate_fn(
+    vocab: list[dict],
+    assignments: list[dict],
+    focus: str = "",
+    *,
+    db_path: Path | None = None,
+    max_usage: int = 10,
+    max_records_evidence: int = 8,
+):
+    """In-memory propose_deprecate for agent loop.
+
+    Returns list of DeprecateProposal (or MergeProposal if LLM says merge_to).
+    """
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent / "agent"))
+    from apply import DeprecateProposal as _DeprecateProposal, MergeProposal as _MergeProposal
+
+    settings = Settings()
+    model = _chat_model(settings).with_structured_output(DeprecateJudgement)
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", SYSTEM_PROMPT + (f"\n\nFOCUS HINT: {focus}" if focus else "")),
+        ("user", USER_PROMPT),
+    ])
+
+    vocab_names = {t["name"] for t in vocab}
+    tag_records = compute_tag_records(assignments)
+
+    candidates = []
+    for t in vocab:
+        usage = len(tag_records.get(t["name"], []))
+        if usage <= max_usage:
+            candidates.append((t, usage))
+    candidates.sort(key=lambda x: x[1])
+
+    proposals: list = []
+    for tag, usage in candidates:
+        record_ids = tag_records.get(tag["name"], [])[:max_records_evidence]
+        details = load_record_details(db_path, record_ids) if db_path else {}
+        evidence = [details[rid] for rid in record_ids if rid in details]
+
+        result = judge_tag(model, prompt, tag, vocab, evidence, usage)
+        if result is None:
+            continue
+        if result.decision == "keep":
+            continue
+        if result.decision == "deprecate":
+            proposals.append(_DeprecateProposal(tag=tag["name"]))
+        elif result.decision == "merge_to":
+            target = result.merge_target
+            if not target or target == tag["name"] or target not in vocab_names:
+                continue
+            proposals.append(_MergeProposal(keep_tag=target, discard_tag=tag["name"]))
+
+    return proposals
+
+
 def run(
     vocab_path: Path,
     assignments_path: Path,
