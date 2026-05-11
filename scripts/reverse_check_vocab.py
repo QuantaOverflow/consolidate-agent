@@ -96,6 +96,58 @@ def format_records(records: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def _run_single_batch(
+    batch_idx: int,
+    batch_records: list[dict],
+    model,
+    prompt,
+    vocab: list[dict],
+    total_batches: int,
+) -> tuple[int, list[dict], float]:
+    """Run one batch. Thread-safe (no shared state mutation).
+
+    Returns (batch_idx, list_of_assignments, elapsed_seconds).
+    On failure, returns assignments marked as missing with error reason.
+    """
+    t0 = time.perf_counter()
+    try:
+        messages = prompt.invoke({
+            "tag_count": len(vocab),
+            "vocab": format_vocab(vocab),
+            "batch_size": len(batch_records),
+            "records": format_records(batch_records),
+        })
+        result: BatchAssignmentOutput | None = model.invoke(messages)
+        if result is None:
+            raise ValueError("structured output returned None (LLM output unparseable)")
+    except Exception as exc:  # noqa: BLE001
+        elapsed = time.perf_counter() - t0
+        out = [{
+            "record_id": rec["record_id"],
+            "title": rec["title"],
+            "selected_tags": [],
+            "missing": True,
+            "missing_concept": "",
+            "reason": f"batch failure: {str(exc)[:200]}",
+        } for rec in batch_records]
+        return batch_idx, out, elapsed
+
+    elapsed = time.perf_counter() - t0
+    by_idx = {a.record_idx: a for a in result.assignments}
+    out = []
+    for rec_idx, rec in enumerate(batch_records, 1):
+        a = by_idx.get(rec_idx)
+        out.append({
+            "record_id": rec["record_id"],
+            "title": rec["title"],
+            "selected_tags": [t.model_dump() for t in (a.selected_tags if a else [])],
+            "missing": a.missing if a else True,
+            "missing_concept": a.missing_concept if a else "",
+            "reason": a.reason if a else "no assignment returned",
+        })
+    return batch_idx, out, elapsed
+
+
 def run(
     db_path: Path,
     vocab_path: Path,
@@ -103,6 +155,7 @@ def run(
     sample_size: int,
     batch_size: int,
     seed: int,
+    concurrency: int = 1,
 ) -> None:
     settings = Settings()
     model = _chat_model(settings).with_structured_output(BatchAssignmentOutput)
@@ -124,69 +177,56 @@ def run(
     assignments_path = output_dir / "reverse_check_assignments.json"
     diagnostics_path = output_dir / "reverse_check_diagnostics.json"
 
-    all_assignments: list[dict] = []
     total_batches = (len(sample) + batch_size - 1) // batch_size
+    print(f"Total batches: {total_batches}, concurrency: {concurrency}", flush=True)
 
+    # Build batch list (batch_idx → records)
+    batches: list[tuple[int, list[dict]]] = []
     for batch_idx in range(total_batches):
         start = batch_idx * batch_size
         end = min(start + batch_size, len(sample))
-        batch_records = sample[start:end]
+        batches.append((batch_idx, sample[start:end]))
 
-        t0 = time.perf_counter()
-        try:
-            messages = prompt.invoke({
-                "tag_count": len(vocab),
-                "vocab": format_vocab(vocab),
-                "batch_size": len(batch_records),
-                "records": format_records(batch_records),
-            })
-            result: BatchAssignmentOutput | None = model.invoke(messages)
-            if result is None:
-                raise ValueError("structured output returned None (LLM output unparseable)")
-        except Exception as exc:  # noqa: BLE001
-            print(f"  batch {batch_idx + 1}/{total_batches} FAILED: {exc}", flush=True)
-            for rec in batch_records:
-                all_assignments.append({
-                    "record_id": rec["record_id"],
-                    "title": rec["title"],
-                    "selected_tags": [],
-                    "missing": True,
-                    "missing_concept": "",
-                    "reason": f"batch failure: {str(exc)[:200]}",
-                })
-            # save partial progress so resuming is possible
-            assignments_path.write_text(
-                json.dumps(all_assignments, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+    results_by_idx: dict[int, list[dict]] = {}
+    wall_start = time.perf_counter()
+
+    if concurrency <= 1:
+        # serial path (original behavior)
+        for batch_idx, batch_records in batches:
+            _, batch_out, elapsed = _run_single_batch(
+                batch_idx, batch_records, model, prompt, vocab, total_batches
             )
-            continue
-        elapsed = time.perf_counter() - t0
+            results_by_idx[batch_idx] = batch_out
+            print(f"  batch {batch_idx + 1}/{total_batches}  records={len(batch_records)}  ({elapsed:.1f}s)", flush=True)
+            # checkpoint
+            ordered = [r for i in sorted(results_by_idx) for r in results_by_idx[i]]
+            assignments_path.write_text(json.dumps(ordered, indent=2, ensure_ascii=False), encoding="utf-8")
+    else:
+        # concurrent path
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            future_to_idx = {
+                ex.submit(_run_single_batch, idx, recs, model, prompt, vocab, total_batches): idx
+                for idx, recs in batches
+            }
+            completed = 0
+            for future in as_completed(future_to_idx):
+                batch_idx, batch_out, elapsed = future.result()
+                results_by_idx[batch_idx] = batch_out
+                completed += 1
+                print(f"  batch {batch_idx + 1}/{total_batches}  records={len(batch_out)}  ({elapsed:.1f}s)  [{completed}/{total_batches}]", flush=True)
+                # checkpoint after each completion
+                ordered = [r for i in sorted(results_by_idx) for r in results_by_idx[i]]
+                assignments_path.write_text(json.dumps(ordered, indent=2, ensure_ascii=False), encoding="utf-8")
 
-        # align by record_idx
-        by_idx = {a.record_idx: a for a in result.assignments}
-        for rec_idx, rec in enumerate(batch_records, 1):
-            a = by_idx.get(rec_idx)
-            all_assignments.append({
-                "record_id": rec["record_id"],
-                "title": rec["title"],
-                "selected_tags": [t.model_dump() for t in (a.selected_tags if a else [])],
-                "missing": a.missing if a else True,
-                "missing_concept": a.missing_concept if a else "",
-                "reason": a.reason if a else "no assignment returned",
-            })
-
-        # checkpoint after each batch
-        assignments_path.write_text(
-            json.dumps(all_assignments, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        print(f"  batch {batch_idx + 1}/{total_batches}  records={len(batch_records)}  ({elapsed:.1f}s)", flush=True)
-
+    # Final ordered assignments
+    all_assignments = [r for i in sorted(results_by_idx) for r in results_by_idx[i]]
     assignments_path.write_text(
         json.dumps(all_assignments, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    print(f"\n  ✅ {len(all_assignments)} assignments → {assignments_path}", flush=True)
+    wall_elapsed = time.perf_counter() - wall_start
+    print(f"\n  ✅ {len(all_assignments)} assignments → {assignments_path}  (wall: {wall_elapsed:.1f}s)", flush=True)
 
     # ── Diagnostics ────────────────────────────────────────────────────────────
 
@@ -292,6 +332,7 @@ def main() -> int:
     parser.add_argument("--sample-size", default=30, type=int)
     parser.add_argument("--batch-size", default=10, type=int)
     parser.add_argument("--seed", default=42, type=int)
+    parser.add_argument("--concurrency", default=1, type=int, help="parallel LLM workers (1=serial, 5-10 safe with DashScope)")
     args = parser.parse_args()
 
     run(
@@ -301,6 +342,7 @@ def main() -> int:
         sample_size=args.sample_size,
         batch_size=args.batch_size,
         seed=args.seed,
+        concurrency=args.concurrency,
     )
     return 0
 
