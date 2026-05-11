@@ -25,26 +25,42 @@ from consolidate_agent.consolidation._utils import _chat_model
 
 
 class DeprecateJudgement(BaseModel):
+    # CoT thinking steps — Pydantic field order forces LLM to output these BEFORE decision
+    records_concept: str = Field(description="STEP 1: In 1 sentence, what core concept do this tag's records collectively represent?")
+    independence_check: str = Field(description="STEP 2: What UNIQUE value does this tag provide that no other vocab tag captures with the same precision? Name the closest other tag and what's distinct.")
+    candidate_targets: str = Field(description="STEP 3: If considering merge_to, list 1-3 plausible target tags and what precision would be lost by merging into each. If no plausible target, say 'none'.")
+    size_prior: str = Field(description="STEP 4: Given usage_count, state the prior. usage>=15: strong keep prior, merge needs OVERWHELMING evidence. usage 5-14: balanced. usage<5: open to merge/deprecate.")
+
     decision: Literal["keep", "deprecate", "merge_to"] = Field(
-        description="keep: still useful; deprecate: remove (records lose this tag); merge_to: fold into another existing tag"
+        description="FINAL decision after analysis above. Default keep unless burden of proof clearly met."
     )
-    reasoning: str = Field(description="1-2 sentences")
-    merge_target: str = Field(default="", description="if merge_to, the existing tag name to fold into")
+    merge_target: str = Field(default="", description="if decision=merge_to, the existing tag name to fold into")
+    reasoning: str = Field(description="1-2 sentence final justification grounded in the steps above")
 
 
-SYSTEM_PROMPT = """You judge whether a low-usage tag in a knowledge tag vocabulary should be kept, deprecated, or merged into another existing tag.
+SYSTEM_PROMPT = """You judge whether a tag in a knowledge tag vocabulary should be kept, deprecated, or merged into another existing tag.
 
-Decision rules:
-- keep: the tag captures a distinct, valuable concept even if usage is low (niche but real)
-- deprecate: the tag's records actually fit no specific concept well, or the records are too few/contextual to justify its existence
-- merge_to: the tag's records fit better under another existing tag — provide the exact existing tag name as merge_target
+**CRITICAL DEFAULT: KEEP.** The burden of proof is on merge_to/deprecate, NOT on keep. Most tags should be kept unless clearly redundant.
 
-Consider:
-- Records' actual content — are they a coherent concept or scattered?
-- Is there an existing tag in the vocab whose definition genuinely covers these records?
-- Is this concept truly distinct from all other vocab tags?
+Work through these analysis steps IN ORDER before deciding:
 
-Be conservative: when in doubt, keep. Better to keep a low-usage tag than to lose a distinct concept."""
+STEP 1 — records_concept: Read all records. In ONE sentence, state the core concept they collectively represent. Don't list features; identify the underlying lesson/pattern.
+
+STEP 2 — independence_check: For each of the closest vocab tags, ask: "could THIS tag's definition cover these records WITH THE SAME PRECISION as the tag under review?" If no — what specific aspect would be lost? This step protects against superficial "this also relates to X" reasoning.
+
+STEP 3 — candidate_targets: If considering merge_to, list 1-3 candidates and for EACH, articulate what precision/aspect is lost by merging. If no candidate truly covers the concept, write 'none'. Be honest: relatedness ≠ subsumption.
+
+STEP 4 — size_prior: usage_count signals usage strength:
+  - usage >= 15: strong KEEP prior. Many records have been tagged this way — merging requires OVERWHELMING evidence ALL records belong elsewhere, not just relatedness.
+  - usage 5-14: balanced. Decide on merits.
+  - usage < 5: more open to merge_to or deprecate.
+
+Then DECIDE:
+- merge_to: records OVERWHELMINGLY belong to another tag's scope, AND no precision is lost
+- deprecate: records don't cohere or are too few/contextual to justify existence
+- keep: in ALL other cases (this is the default)
+
+Important: "tag A's records also relate to tag B" is NOT sufficient for merge_to(A, B). Both tags can capture different aspects of the same records. Merge ONLY when tag A's distinct contribution would not be missed."""
 
 
 USER_PROMPT = """## Tag under review

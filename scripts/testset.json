@@ -1,0 +1,38 @@
+{
+  "propose_merge_cases": [
+    {"tag_a": "commit_messaging", "tag_b": "git_workflow", "expected": "merge", "keep_tag": "git_workflow", "notes": "commit_messaging is a narrow facet of broader git_workflow"},
+    {"tag_a": "llm_integration", "tag_b": "prompt_resilience", "expected": "keep_distinct", "notes": "broad lifecycle vs specific prompt-engineering hygiene"},
+    {"tag_a": "llm_integration", "tag_b": "tool_usage_patterns", "expected": "keep_distinct", "notes": "broad integration vs tool-specific patterns"},
+    {"tag_a": "type_safety", "tag_b": "validation_layering", "expected": "keep_distinct", "notes": "correctness principle vs architectural strategy"},
+    {"tag_a": "test_isolation", "tag_b": "testing_strategy", "expected": "keep_distinct", "notes": "operational independence vs methodological choice"},
+    {"tag_a": "state_isolation", "tag_b": "state_mutation", "expected": "keep_distinct", "notes": "containment vs change discipline"},
+    {"tag_a": "dependency_management", "tag_b": "refactor_safety", "expected": "keep_distinct", "notes": "external deps vs internal codebase integrity"},
+    {"tag_a": "routing_logic", "tag_b": "state_isolation", "expected": "keep_distinct", "notes": "control flow vs state containment"},
+    {"tag_a": "directory_structure", "tag_b": "skill_system_design", "expected": "keep_distinct", "notes": "concrete technique vs broader paradigm"},
+    {"tag_a": "async_execution", "tag_b": "concurrency_safety", "expected": "keep_distinct", "notes": "orchestration vs correctness"},
+
+    {"tag_a": "cli_design", "tag_b": "git_workflow", "expected": "keep_distinct", "notes": "different domains"},
+    {"tag_a": "browser_automation", "tag_b": "state_isolation", "expected": "keep_distinct", "notes": "different axes"},
+    {"tag_a": "fallback_strategy", "tag_b": "ui_rendering", "expected": "keep_distinct", "notes": "completely distinct"},
+    {"tag_a": "schema_evolution", "tag_b": "browser_automation", "expected": "keep_distinct", "notes": "data layer vs frontend"},
+
+    {"tag_a": "jsonp_handling", "tag_b": "http_protocol", "expected": "merge", "keep_tag": "http_protocol", "notes": "JSONP is fundamentally an HTTP protocol detail"},
+    {"tag_a": "symlink_handling", "tag_b": "directory_structure", "expected": "merge", "keep_tag": "directory_structure", "notes": "symlinks are filesystem layout technique, definition explicitly mentions symbolic links"}
+  ],
+
+  "propose_deprecate_cases": [
+    {"tag": "early_termination", "expected": "keep", "notes": "core abstract pattern, 22+ themes, distinct concept"},
+    {"tag": "state_isolation", "expected": "keep", "notes": "top-tier tag, 63 usage, clearly distinct"},
+    {"tag": "fallback_strategy", "expected": "keep", "notes": "high-usage broad pattern"},
+
+    {"tag": "symlink_handling", "expected": "merge_to", "merge_target": "directory_structure", "notes": "all 3 records are filesystem layout"},
+    {"tag": "jsonp_handling", "expected": "merge_to", "merge_target": "http_protocol", "notes": "all records are HTTP-layer JSONP semantics"},
+
+    {"tag": "event_driven_architecture", "expected": "keep", "notes": "distinct architectural paradigm not covered by routing_logic or observability"},
+    {"tag": "regex_parsing", "expected": "keep", "notes": "distinct technique with cross-cutting safety concerns"},
+
+    {"tag": "credential_security", "expected": "keep", "notes": "security concerns broader than just network: env vars, CLI password passing"},
+    {"tag": "permission_control", "expected": "keep", "notes": "permission/authz is a distinct concept from generic network security"},
+    {"tag": "encoding_handling", "expected": "keep", "notes": "byte/str encoding semantics is conceptually different from type safety"}
+  ]
+}
