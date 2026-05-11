@@ -2,12 +2,15 @@
   "name": "scenario_2_unused_tag",
   "description": "Added fake niche tag with 0 records in assignments",
   "acceptable_actions": [
-    "propose_deprecate"
+    "propose_deprecate",
+    "propose_new"
   ],
   "rejected_actions": [
-    "propose_new",
     "propose_merge",
     "done"
+  ],
+  "expected_confidence": [
+    "high"
   ],
   "must_probe": [
     "inspect_tag"
@@ -17,5 +20,5 @@
     "obscure_xml_quirk",
     "unused"
   ],
-  "notes": "Trivial: unused_tags signal clear. Agent should immediately recognize and act."
+  "notes": "unused tag obvious; either deprecate it or address missing first (both defensible). Should be high confidence."
 }

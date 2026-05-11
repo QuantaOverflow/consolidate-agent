@@ -9,10 +9,13 @@
     "propose_merge",
     "propose_deprecate"
   ],
+  "expected_confidence": [
+    "high"
+  ],
   "must_probe": [],
   "reasoning_must_mention": [
     "healthy",
     "no strong signal"
   ],
-  "notes": "Knows when to stop: doesn't manufacture work when vocab is in good shape."
+  "notes": "Should be high confidence done — clear healthy state."
 }

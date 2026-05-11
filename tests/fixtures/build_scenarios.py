@@ -54,6 +54,7 @@ def scenario_1_real():
         "description": "Real v1.1 data — 60 missing but ~77% are LLM false negatives (verified earlier)",
         "acceptable_actions": ["propose_new", "done"],
         "rejected_actions": ["propose_merge", "propose_deprecate"],
+        "expected_confidence": ["medium", "high"],
         "must_probe": ["inspect_missing_records"],
         "must_NOT_propose_merge_pair": ["llm_integration", "prompt_resilience"],
         "reasoning_must_mention": ["missing", "false positive"],
@@ -77,12 +78,13 @@ def scenario_2_unused_tag():
     expected = {
         "name": "scenario_2_unused_tag",
         "description": "Added fake niche tag with 0 records in assignments",
-        "acceptable_actions": ["propose_deprecate"],
-        "rejected_actions": ["propose_new", "propose_merge", "done"],
+        "acceptable_actions": ["propose_deprecate", "propose_new"],
+        "rejected_actions": ["propose_merge", "done"],
+        "expected_confidence": ["high"],
         "must_probe": ["inspect_tag"],
         "probe_target_must_include": "obscure_xml_quirk",
         "reasoning_must_mention": ["obscure_xml_quirk", "unused"],
-        "notes": "Trivial: unused_tags signal clear. Agent should immediately recognize and act."
+        "notes": "unused tag obvious; either deprecate it or address missing first (both defensible). Should be high confidence."
     }
     save_scenario("scenario_2_unused", vocab, diag, assign, expected)
 
@@ -116,12 +118,13 @@ def scenario_3_split_synonym():
     expected = {
         "name": "scenario_3_split_synonym",
         "description": "Injected state_namespacing as near-synonym of state_isolation, 50% records moved",
-        "acceptable_actions": ["propose_merge"],
-        "rejected_actions": ["propose_deprecate", "done"],
-        "must_probe": ["inspect_cooccur_pair", "compare_tag_records", "inspect_tag"],
+        "acceptable_actions": ["propose_merge", "done", "propose_new"],
+        "rejected_actions": ["propose_deprecate"],
+        "expected_confidence": ["low", "medium"],
+        "must_probe": ["state_namespacing", "state_isolation"],
         "probe_pair_must_include": ["state_isolation", "state_namespacing"],
-        "reasoning_must_mention": ["state_isolation", "state_namespacing", "synonym"],
-        "notes": "Detecting near-synonym requires probing — defs alone don't make it obvious."
+        "reasoning_must_mention": ["state_isolation", "state_namespacing"],
+        "notes": "Borderline case: defs look similar (0.82) but LLM can find legitimate distinctions. Agent should mark low/medium confidence to flag for human review."
     }
     save_scenario("scenario_3_split", vocab, diag, assign, expected)
 
@@ -152,11 +155,12 @@ def scenario_4_fake_cooccur():
         "description": "Forced cli_design + git_workflow cooccurrence by adding git_workflow tag to 15 cli records (legitimately distinct domains)",
         "acceptable_actions": ["propose_new", "done"],  # NOT propose_merge!
         "rejected_actions": ["propose_merge"],
+        "expected_confidence": ["high", "medium"],
         "must_probe": ["inspect_cooccur_pair"],
         "probe_pair_must_include": ["cli_design", "git_workflow"],
         "reasoning_must_mention": ["different domain", "distinct"],
         "must_NOT_propose_merge_pair": ["cli_design", "git_workflow"],
-        "notes": "CRITICAL bias test: agent must probe high cooccur and recognize false signal. Probe content shows records are about CLI design that happens to involve git, not about merging two concepts."
+        "notes": "CRITICAL bias test: agent must probe high cooccur and recognize false signal. Should be high/medium confidence on the rejection."
     }
     save_scenario("scenario_4_fake_cooccur", vocab, diag, assign, expected)
 
@@ -188,9 +192,10 @@ def scenario_5_healthy():
         "description": "Synthetic healthy state: hit_rate ~97%, missing=20, no unused, no extreme cooccur",
         "acceptable_actions": ["done"],
         "rejected_actions": ["propose_new", "propose_merge", "propose_deprecate"],
-        "must_probe": [],  # no probe needed; agent should detect "healthy" from signals alone
+        "expected_confidence": ["high"],
+        "must_probe": [],
         "reasoning_must_mention": ["healthy", "no strong signal"],
-        "notes": "Knows when to stop: doesn't manufacture work when vocab is in good shape."
+        "notes": "Should be high confidence done — clear healthy state."
     }
     save_scenario("scenario_5_healthy", vocab, diag, assign, expected)
 

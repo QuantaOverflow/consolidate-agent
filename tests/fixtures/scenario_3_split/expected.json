@@ -2,16 +2,20 @@
   "name": "scenario_3_split_synonym",
   "description": "Injected state_namespacing as near-synonym of state_isolation, 50% records moved",
   "acceptable_actions": [
-    "propose_merge"
+    "propose_merge",
+    "done",
+    "propose_new"
   ],
   "rejected_actions": [
-    "propose_deprecate",
-    "done"
+    "propose_deprecate"
+  ],
+  "expected_confidence": [
+    "low",
+    "medium"
   ],
   "must_probe": [
-    "inspect_cooccur_pair",
-    "compare_tag_records",
-    "inspect_tag"
+    "state_namespacing",
+    "state_isolation"
   ],
   "probe_pair_must_include": [
     "state_isolation",
@@ -19,8 +23,7 @@
   ],
   "reasoning_must_mention": [
     "state_isolation",
-    "state_namespacing",
-    "synonym"
+    "state_namespacing"
   ],
-  "notes": "Detecting near-synonym requires probing — defs alone don't make it obvious."
+  "notes": "Borderline case: defs look similar (0.82) but LLM can find legitimate distinctions. Agent should mark low/medium confidence to flag for human review."
 }

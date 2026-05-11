@@ -20,6 +20,7 @@ from consolidate_agent.consolidation._utils import _chat_model
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from probes import run_probe  # noqa: E402
+from vocab_similarity import find_similar_pairs  # noqa: E402
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -40,6 +41,9 @@ class DiagnosticDecision(BaseModel):
     probe_findings_summary: str = Field(description="STEP 1: Summarize what the probes revealed in 1-3 sentences. Cite specific record titles or counts.")
     bias_assessment: str = Field(description="STEP 2: Were the raw signals reliable? Did probes confirm or refute them? Be specific about what was misleading.")
     independence_check: str = Field(description="STEP 3 (only if considering merge/deprecate): is one tag actually subsumed by another, or are they distinct axes?")
+
+    confidence: Literal["high", "medium", "low"] = Field(description="STEP 4 — SELF-ASSESSMENT: how confident in this decision? high=probes unanimously support; medium=probes mostly support with some tension; low=genuine ambiguity, multiple defensible decisions, would benefit from human review.")
+    uncertainty_reasons: list[str] = Field(default_factory=list, description="If confidence < high, list 1-3 specific reasons (e.g. 'high def similarity but distinct usage patterns', 'probe sample too small', 'records could be re-tagged either way'). Empty if confidence=high.")
 
     next_action: Literal["propose_new", "propose_merge", "propose_deprecate", "done"] = Field(description="FINAL: which workflow to run next, or done if vocab is healthy.")
     action_focus: str = Field(default="", description="Specific guidance for the chosen workflow: e.g. 'focus on the 14 truly missing records about permission/encoding' or 'target tag X'. Empty if action=done.")
@@ -87,7 +91,10 @@ tag size distribution (top 10):
 tag size distribution (bottom 5, excluding 0):
 {bottom_usage}
 
-Plan probes to verify suspicious signals."""
+## Suspected redundancy pairs (high definition similarity — may indicate near-synonyms)
+{similar_pairs}
+
+Plan probes to verify suspicious signals. Pay attention to suspected redundancy pairs — if any pair has high def similarity, probe it before deciding action."""
 
 
 DECIDE_SYSTEM = """You are now deciding the next action based on probe findings.
@@ -105,7 +112,36 @@ Critical: probe findings OVERRIDE raw signals. If raw missing_rate was high but 
 action_focus should be specific. E.g.:
 - "focus on records about encoding/byte semantics (3 records found)" not just "missing records"
 - "target tag obscure_xml_quirk (0 usage, no semantic overlap)" not just "deprecate unused"
-- "" if action=done"""
+- "" if action=done
+
+CRITICAL — self-assess confidence HONESTLY. Default starting point: medium. Only escalate to high if the evidence is overwhelming. Only stay at medium or drop to low if uncertainty is genuine.
+
+Calibration rules (apply these BEFORE deciding confidence):
+
+1. **Suspected redundancy pairs were flagged in plan input** (high def similarity). For EACH such pair:
+   - If you decide MERGE based on probes → confidence can be high (probes confirmed the suspicion)
+   - If you decide KEEP_DISTINCT despite high similarity → confidence MUST be medium or low (you're overruling a strong static signal; reasonable people might disagree). NEVER say high in this case.
+
+2. **Raw signals contradict probe findings**:
+   - If raw missing_rate was high but probes show most are false positives → medium (probes refuted raw, but you're trusting probes over aggregate)
+   - If raw cooccur was high but probes show legit multi-axis → medium
+
+3. **Probes were insufficient**:
+   - Did you probe everything the plan suggested? If you skipped suspected pairs, your decision is undertested → at most medium
+   - If probe sample size was too small (e.g. 3 records to judge a 30-record tag) → at most medium
+
+4. **Decision is action=done**:
+   - If you said "vocab is healthy" but there ARE suspected pairs, low missing rate, AND some signals were ambiguous → at most medium
+
+When to say HIGH (rare, must meet all):
+- Probes gave unanimous, unambiguous signal
+- No suspected redundancy pairs above 0.80 left unresolved
+- Decision is consistent with both raw signals AND probe findings (no override)
+- Reviewer looking at same data would clearly agree
+
+Otherwise: medium or low.
+
+uncertainty_reasons must be SPECIFIC and concrete — e.g. "state_isolation and state_namespacing have 0.82 def similarity but records show distinct usage axes (containment vs key-scoping)" — not generic phrases like "borderline case". Include the specific pair names or numeric thresholds that drive uncertainty."""
 
 
 DECIDE_USER = """## Original raw signals
@@ -144,6 +180,12 @@ def _bottom_usage_str(tag_usage: dict[str, int], n: int = 5) -> str:
     return "\n".join(f"  {c:>3}  {t}" for t, c in nonzero[:n])
 
 
+def _similar_pairs_str(pairs: list[dict]) -> str:
+    if not pairs:
+        return "  (none above threshold)"
+    return "\n".join(f"  {p['similarity']:.3f}  {p['tag_a']} ↔ {p['tag_b']}" for p in pairs)
+
+
 def diagnose(vocab: list[dict], diagnostics: dict, assignments: list[dict], db_path: Path) -> dict:
     settings = Settings()
     plan_model = _chat_model(settings).with_structured_output(PlanOutput)
@@ -155,6 +197,9 @@ def diagnose(vocab: list[dict], diagnostics: dict, assignments: list[dict], db_p
     total = diagnostics["sample_size"]
     missing = diagnostics["total_missing"]
     missing_rate = missing / total if total else 0.0
+
+    # Pre-compute suspected redundancy pairs via def cosine similarity
+    similar_pairs = find_similar_pairs(vocab, threshold=0.80, top_n=5)
 
     # Step 1: plan
     plan_msg = plan_prompt.invoke({
@@ -168,6 +213,7 @@ def diagnose(vocab: list[dict], diagnostics: dict, assignments: list[dict], db_p
         "top_cooccur": _top_cooccur_str(diagnostics["top_cooccurrence_pairs"]),
         "top_usage": _top_usage_str(diagnostics["tag_usage_count"]),
         "bottom_usage": _bottom_usage_str(diagnostics["tag_usage_count"]),
+        "similar_pairs": _similar_pairs_str(similar_pairs),
     })
     plan: PlanOutput | None = plan_model.invoke(plan_msg)
     if plan is None:
@@ -196,9 +242,26 @@ def diagnose(vocab: list[dict], diagnostics: dict, assignments: list[dict], db_p
     if decision is None:
         raise ValueError("decide step returned None twice")
 
+    # External calibration: downgrade confidence if high but didn't merge a 0.80+ similar pair
+    decision_dict = decision.model_dump()
+    for pair in similar_pairs:
+        if pair["similarity"] >= 0.80:
+            # If agent didn't merge this pair AND confidence is high → downgrade
+            merged_this = (
+                decision.next_action == "propose_merge"
+                and pair["tag_a"].lower() in (decision.action_focus or "").lower()
+                and pair["tag_b"].lower() in (decision.action_focus or "").lower()
+            )
+            if not merged_this and decision.confidence == "high":
+                decision_dict["confidence"] = "medium"
+                decision_dict["uncertainty_reasons"] = list(decision.uncertainty_reasons) + [
+                    f"External calibration: {pair['tag_a']} ↔ {pair['tag_b']} similarity={pair['similarity']:.2f} but not merged — reviewer should verify"
+                ]
+
     return {
         "plan": plan.model_dump(),
+        "similar_pairs": similar_pairs,
         "probe_calls": list(plan.probe_calls_needed[:3]),
         "findings": findings,
-        "decision": decision.model_dump(),
+        "decision": decision_dict,
     }

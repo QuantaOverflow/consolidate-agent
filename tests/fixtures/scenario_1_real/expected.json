@@ -9,6 +9,10 @@
     "propose_merge",
     "propose_deprecate"
   ],
+  "expected_confidence": [
+    "medium",
+    "high"
+  ],
   "must_probe": [
     "inspect_missing_records"
   ],

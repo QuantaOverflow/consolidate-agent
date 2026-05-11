@@ -67,8 +67,13 @@ def score_decision(decision: dict, probe_calls: list[str], expected: dict) -> di
     mention_count = sum(1 for kw in must_mention if kw.lower() in full_text)
     mention_ratio = mention_count / len(must_mention) if must_mention else 1.0
 
-    passed_count = sum([action_ok, probe_ok, merge_safety_ok, target_ok, mention_ratio >= 0.5])
-    total_criteria = 5
+    # 6. confidence calibration
+    expected_confidence = expected.get("expected_confidence", ["high", "medium", "low"])
+    predicted_confidence = decision.get("confidence", "high")
+    confidence_ok = predicted_confidence in expected_confidence
+
+    passed_count = sum([action_ok, probe_ok, merge_safety_ok, target_ok, mention_ratio >= 0.5, confidence_ok])
+    total_criteria = 6
 
     return {
         "action_ok": action_ok,
@@ -76,6 +81,8 @@ def score_decision(decision: dict, probe_calls: list[str], expected: dict) -> di
         "merge_safety_ok": merge_safety_ok,
         "target_ok": target_ok,
         "mention_ratio": round(mention_ratio, 2),
+        "confidence_ok": confidence_ok,
+        "predicted_confidence": predicted_confidence,
         "score": passed_count / total_criteria,
         "predicted_action": action,
     }
@@ -132,10 +139,15 @@ def run(scenarios: list[str] | None = None):
         symbol = "✅" if score["score"] >= 0.8 else ("⚠️" if score["score"] >= 0.5 else "❌")
         print(f"\n{symbol} Score: {score['score']:.0%}")
         print(f"   action_ok:        {'✓' if score['action_ok'] else '✗'} (predicted={score['predicted_action']})")
+        print(f"   confidence_ok:    {'✓' if score['confidence_ok'] else '✗'} (predicted={score['predicted_confidence']}, expected={scenario['expected'].get('expected_confidence')})")
         print(f"   probe_ok:         {'✓' if score['probe_ok'] else '✗'}")
         print(f"   merge_safety_ok:  {'✓' if score['merge_safety_ok'] else '✗'}")
         print(f"   target_ok:        {'✓' if score['target_ok'] else '✗'}")
         print(f"   mention_ratio:    {score['mention_ratio']}")
+        if decision.get('uncertainty_reasons'):
+            print(f"   uncertainty_reasons:")
+            for r in decision['uncertainty_reasons'][:3]:
+                print(f"     - {r[:150]}")
 
         all_results.append({
             "scenario": scenario["name"],

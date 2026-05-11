@@ -8,6 +8,10 @@
   "rejected_actions": [
     "propose_merge"
   ],
+  "expected_confidence": [
+    "high",
+    "medium"
+  ],
   "must_probe": [
     "inspect_cooccur_pair"
   ],
@@ -23,5 +27,5 @@
     "cli_design",
     "git_workflow"
   ],
-  "notes": "CRITICAL bias test: agent must probe high cooccur and recognize false signal. Probe content shows records are about CLI design that happens to involve git, not about merging two concepts."
+  "notes": "CRITICAL bias test: agent must probe high cooccur and recognize false signal. Should be high/medium confidence on the rejection."
 }
