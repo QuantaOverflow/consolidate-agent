@@ -182,11 +182,21 @@ def distill_step(model_factory, records: list[dict], batch_size: int, log_file) 
     return all_themes
 
 
-def synthesize_step(model_factory, themes: list[dict], log_file) -> dict:
-    """Returns synthesize raw output (vocab + notes)."""
+def synthesize_step(
+    model_factory,
+    themes: list[dict],
+    log_file,
+    *,
+    system_prompt: str = SYNTHESIZE_SYSTEM,
+) -> dict:
+    """Returns synthesize raw output (vocab + notes).
+
+    `system_prompt` defaults to the module-level SYNTHESIZE_SYSTEM constant.
+    Pass a different string to A/B-test prompt variants without editing source.
+    """
     synthesize_model = model_factory().with_structured_output(SynthesizeOutput)
     synthesize_prompt = ChatPromptTemplate.from_messages([
-        ("system", SYNTHESIZE_SYSTEM),
+        ("system", system_prompt),
         ("user", SYNTHESIZE_USER),
     ])
 
