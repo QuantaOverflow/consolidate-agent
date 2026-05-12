@@ -84,6 +84,7 @@ class TagRecordNetwork:
         on_vocab_review: Callable[[list[dict]], str] | None = None,
         thread_id: str | None = None,
         checkpoint_db: Path | None = None,
+        themes_seed: dict[str, str] | None = None,
     ) -> "TagRecordNetwork":
         """Build a fresh network from raw records via LangGraph state machine.
 
@@ -122,6 +123,7 @@ class TagRecordNetwork:
             "batch_size": batch_size,
             "concurrency": concurrency,
             "auto_accept": on_vocab_review is None,
+            "themes_seed": dict(themes_seed) if themes_seed else {},
         }
 
         with sqlite_checkpointer(checkpoint_db) as cp:

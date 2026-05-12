@@ -24,19 +24,21 @@ from .state import BootstrapState
 # ── Default node implementations (LLM-backed) ────────────────────────────────
 
 
-def _default_distill(db_path: str, batch_size: int) -> list[dict]:
-    """Real LLM distill: records → themes."""
+def _default_distill(records: list[dict], batch_size: int) -> list[dict]:
+    """Real LLM distill on the given records (record loading happens in the node).
+
+    Takes a records list rather than db_path so the node can pre-filter to
+    just the uncached subset when a themes_seed is provided.
+    """
     from consolidate_agent.config import Settings
     from consolidate_agent.consolidation._utils import _chat_model
 
     from ..bootstrap import distill_step
-    from ..measure import load_records
 
     settings = Settings()
     def model_factory():
         return _chat_model(settings)
 
-    records = load_records(Path(db_path))
     log_sink = io.StringIO()
     return distill_step(model_factory, records, batch_size, log_sink)
 
@@ -83,26 +85,63 @@ def _filter_dangling_refs(assignments: list[dict], vocab: list[dict]) -> int:
 # ── Graph builder ────────────────────────────────────────────────────────────
 
 
+def _default_load_records(db_path: str) -> list[dict]:
+    from ..measure import load_records
+    return load_records(Path(db_path))
+
+
 def build_bootstrap_graph(
     checkpointer: Any,
     *,
-    distill_fn: Callable[[str, int], list[dict]] | None = None,
+    distill_fn: Callable[[list[dict], int], list[dict]] | None = None,
     synthesize_fn: Callable[[list[dict]], dict] | None = None,
     reverse_check_fn: Callable[[str, list[dict], int], list[dict]] | None = None,
+    records_loader_fn: Callable[[str], list[dict]] | None = None,
 ):
     """Compile a bootstrap StateGraph with the given checkpointer.
 
-    Pass `*_fn` kwargs to inject fake LLM functions for tests.
+    Pass `*_fn` kwargs to inject fake LLM / DB functions for tests.
+
+    distill_fn signature: (records: list[dict], batch_size: int) -> themes_list
+        (changed from (db_path, batch_size) so the node can pre-filter records
+        against the themes_seed cache before calling distill.)
+
+    records_loader_fn signature: (db_path: str) -> list[dict]
+        Returns records to distill. Defaults to load_records(Path(db_path)).
     """
     distill_impl = distill_fn or _default_distill
     synthesize_impl = synthesize_fn or _default_synthesize
     reverse_check_impl = reverse_check_fn or _default_reverse_check
+    load_records_impl = records_loader_fn or _default_load_records
 
     # ── Nodes ────────────────────────────────────────────────────────────
 
     def distill_node(state: BootstrapState) -> dict:
-        themes = distill_impl(state["db_path"], state.get("batch_size", 30))
-        return {"themes": themes}
+        records = load_records_impl(state["db_path"])
+        seed = state.get("themes_seed") or {}
+
+        cached = []
+        to_distill = []
+        for r in records:
+            if r["record_id"] in seed and seed[r["record_id"]]:
+                cached.append({
+                    "record_id": r["record_id"],
+                    "title": r.get("title", ""),
+                    "theme": seed[r["record_id"]],
+                })
+            else:
+                to_distill.append(r)
+
+        if cached:
+            print(f"  [distill] {len(cached)}/{len(records)} themes from seed (zero LLM)", flush=True)
+
+        if to_distill:
+            print(f"  [distill] running LLM on {len(to_distill)} uncached records", flush=True)
+            fresh = distill_impl(to_distill, state.get("batch_size", 30))
+        else:
+            fresh = []
+
+        return {"themes": cached + fresh}
 
     def synthesize_node(state: BootstrapState) -> dict:
         result = synthesize_impl(state["themes"])

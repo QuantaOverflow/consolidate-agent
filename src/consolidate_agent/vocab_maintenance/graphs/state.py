@@ -20,6 +20,7 @@ class BootstrapState(TypedDict, total=False):
     batch_size: int             # distill batch size (default 30)
     concurrency: int            # ThreadPool workers for reverse_check
     auto_accept: bool           # if True, skip vocab_review interrupt
+    themes_seed: dict           # record_id → theme (skips re-distill for known records)
 
     # Intermediate artifacts
     themes: list[dict]          # output of distill: [{record_id, title, theme}]

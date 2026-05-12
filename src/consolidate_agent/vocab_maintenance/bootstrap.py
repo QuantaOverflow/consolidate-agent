@@ -77,8 +77,8 @@ STRICT NAMING RULES (these are absolute):
 
 Goals:
 - Coverage: every theme must belong to exactly one tag
-- Reuse: tags with 5+ themes are good; tags with 2 are minimum
-- Total count: as many as needed, but cleaner vocab > more tags
+- Cluster size targets: each tag should average 10-25 themes. Tags covering fewer than 5 themes should merge into broader categories; tags covering more than 40 themes should split into finer-grained patterns. Aim for a balanced size distribution, not a few mega-clusters.
+- Total count: aim for {target_lo}-{target_hi} tags for this corpus of {theme_count} themes. Producing far fewer means each tag is overly broad; producing far more means the vocabulary is over-fragmented. Treat this as a hard guidance, not a preference for 'cleaner over more'.
 
 If a theme doesn't fit any current cluster, you may create a new cluster for it (but think carefully — can it merge with an existing cluster?). Don't create a cluster of one.
 
@@ -237,17 +237,29 @@ def distill_step(
     return [r for i in sorted(results_by_idx) for r in results_by_idx[i]]
 
 
+def _default_target_count_range(n_themes: int) -> tuple[int, int]:
+    """Heuristic: aim for ~12-25 themes per cluster (independent of dataset size).
+
+    target_lo = max(10, n // 25)   # below this → tags too broad
+    target_hi = max(20, n // 12)   # above this → over-fragmented
+    For 696 themes: (27, 58). For 200: (10, 16). For 5000: (200, 416).
+    """
+    return max(10, n_themes // 25), max(20, n_themes // 12)
+
+
 def synthesize_step(
     model_factory,
     themes: list[dict],
     log_file,
     *,
     system_prompt: str = SYNTHESIZE_SYSTEM,
+    target_count_range: tuple[int, int] | None = None,
 ) -> dict:
     """Returns synthesize raw output (vocab + notes).
 
     `system_prompt` defaults to the module-level SYNTHESIZE_SYSTEM constant.
-    Pass a different string to A/B-test prompt variants without editing source.
+    `target_count_range` overrides the auto-derived (lo, hi) range; if None,
+    computed from len(themes) via _default_target_count_range.
     """
     synthesize_model = model_factory().with_structured_output(SynthesizeOutput)
     synthesize_prompt = ChatPromptTemplate.from_messages([
@@ -256,11 +268,14 @@ def synthesize_step(
     ])
 
     theme_texts = [t["theme"] for t in themes]
+    target_lo, target_hi = target_count_range or _default_target_count_range(len(theme_texts))
 
     t0 = time.perf_counter()
     messages = synthesize_prompt.invoke({
         "theme_count": len(theme_texts),
         "themes": format_themes_for_synthesize(theme_texts),
+        "target_lo": target_lo,
+        "target_hi": target_hi,
     })
     result: SynthesizeOutput = synthesize_model.invoke(messages)
     elapsed = time.perf_counter() - t0

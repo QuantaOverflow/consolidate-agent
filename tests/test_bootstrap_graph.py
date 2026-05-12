@@ -25,11 +25,41 @@ def test(fn):
 # ── Fake LLM impls ───────────────────────────────────────────────────────────
 
 
-def fake_distill(db_path: str, batch_size: int) -> list[dict]:
+# Three test records — the records_loader returns these regardless of db_path
+TEST_RECORDS = [
+    {"record_id": "r1", "title": "t1", "insight": "i1"},
+    {"record_id": "r2", "title": "t2", "insight": "i2"},
+    {"record_id": "r3", "title": "t3", "insight": "i3"},
+]
+
+
+def fake_load_records(db_path: str) -> list[dict]:
+    return [dict(r) for r in TEST_RECORDS]
+
+
+def make_fake_distill(themes_for_records=None):
+    """Returns a distill_fn that synthesizes a theme per record.
+    Tracks the records list it was called with."""
+    if themes_for_records is None:
+        themes_for_records = {r["record_id"]: f"theme for {r['record_id']}" for r in TEST_RECORDS}
+
+    seen_records = []
+    def fn(records, batch_size):
+        seen_records.extend(records)
+        return [
+            {"record_id": r["record_id"], "title": r["title"],
+             "theme": themes_for_records.get(r["record_id"], f"default theme for {r['record_id']}")}
+            for r in records
+        ]
+    fn._seen_records = seen_records
+    return fn
+
+
+# Default fake_distill for existing tests that don't care about seed behavior
+def fake_distill(records: list[dict], batch_size: int) -> list[dict]:
     return [
-        {"record_id": "r1", "title": "t1", "theme": "pattern about X"},
-        {"record_id": "r2", "title": "t2", "theme": "pattern about Y"},
-        {"record_id": "r3", "title": "t3", "theme": "pattern about Z"},
+        {"record_id": r["record_id"], "title": r["title"], "theme": f"pattern for {r['record_id']}"}
+        for r in records
     ]
 
 
@@ -73,7 +103,8 @@ def test_b1_unattended_e2e_auto_accept():
     g = build_bootstrap_graph(memory_checkpointer(),
                               distill_fn=fake_distill,
                               synthesize_fn=fake_synthesize_seq([vocab]),
-                              reverse_check_fn=fake_reverse_check)
+                              reverse_check_fn=fake_reverse_check,
+                              records_loader_fn=fake_load_records)
     r = g.invoke({"db_path": "fake.db", "auto_accept": True},
                  {"configurable": {"thread_id": "t1"}})
     assert "__interrupt__" not in r
@@ -89,7 +120,8 @@ def test_b2_hitl_accept_first_attempt():
     g = build_bootstrap_graph(memory_checkpointer(),
                               distill_fn=fake_distill,
                               synthesize_fn=syn,
-                              reverse_check_fn=fake_reverse_check)
+                              reverse_check_fn=fake_reverse_check,
+                              records_loader_fn=fake_load_records)
     seen = []
     def on_review(p):
         seen.append(p)
@@ -110,7 +142,8 @@ def test_b3_hitl_regenerate_then_accept():
     g = build_bootstrap_graph(memory_checkpointer(),
                               distill_fn=fake_distill,
                               synthesize_fn=syn,
-                              reverse_check_fn=fake_reverse_check)
+                              reverse_check_fn=fake_reverse_check,
+                              records_loader_fn=fake_load_records)
     decisions = iter(["regenerate", "accept"])
     r = drive(g, {"db_path": "fake.db"}, {"configurable": {"thread_id": "t3"}},
               on_review=lambda p: next(decisions))
@@ -125,7 +158,8 @@ def test_b4_hitl_abort():
     g = build_bootstrap_graph(memory_checkpointer(),
                               distill_fn=fake_distill,
                               synthesize_fn=fake_synthesize_seq([vocab]),
-                              reverse_check_fn=fake_reverse_check)
+                              reverse_check_fn=fake_reverse_check,
+                              records_loader_fn=fake_load_records)
     r = drive(g, {"db_path": "fake.db"}, {"configurable": {"thread_id": "t4"}},
               on_review=lambda p: "abort")
     assert r.get("abort_reason")
@@ -148,7 +182,8 @@ def test_b5_filter_dangling_refs():
     g = build_bootstrap_graph(memory_checkpointer(),
                               distill_fn=fake_distill,
                               synthesize_fn=fake_synthesize_seq([vocab]),
-                              reverse_check_fn=rc_with_bad)
+                              reverse_check_fn=rc_with_bad,
+                              records_loader_fn=fake_load_records)
     r = g.invoke({"db_path": "fake.db", "auto_accept": True},
                  {"configurable": {"thread_id": "t5"}})
     r1 = next(a for a in r["assignments"] if a["record_id"] == "r1")
@@ -166,11 +201,68 @@ def test_b6_invalid_resume_defaults_to_accept():
     g = build_bootstrap_graph(memory_checkpointer(),
                               distill_fn=fake_distill,
                               synthesize_fn=fake_synthesize_seq([vocab]),
-                              reverse_check_fn=fake_reverse_check)
+                              reverse_check_fn=fake_reverse_check,
+                              records_loader_fn=fake_load_records)
     r = drive(g, {"db_path": "fake.db"}, {"configurable": {"thread_id": "t6"}},
               on_review=lambda p: "garbage_value")
     assert len(r["assignments"]) == 3
     assert r["review_decision"] == "accept"
+
+
+@test
+def test_b8_themes_seed_full_coverage_skips_distill():
+    """All records in seed → distill_fn never called, themes come from seed."""
+    vocab = [{"name": "tag_a", "definition": "a"}]
+    seed = {r["record_id"]: f"seeded theme {r['record_id']}" for r in TEST_RECORDS}
+    fake_d = make_fake_distill()  # tracks records it sees
+    g = build_bootstrap_graph(memory_checkpointer(),
+                              distill_fn=fake_d,
+                              synthesize_fn=fake_synthesize_seq([vocab]),
+                              reverse_check_fn=fake_reverse_check,
+                              records_loader_fn=fake_load_records)
+    r = g.invoke({"db_path": "fake.db", "auto_accept": True, "themes_seed": seed},
+                 {"configurable": {"thread_id": "t8"}})
+    assert fake_d._seen_records == [], "distill should NOT be called when all records in seed"
+    # The themes returned should match the seed
+    themes_dict = {t["record_id"]: t["theme"] for t in r["themes"]}
+    assert themes_dict == seed
+
+
+@test
+def test_b9_themes_seed_partial_coverage_distills_rest():
+    """Seed covers 2/3 records → distill_fn called for just the 1 uncached."""
+    vocab = [{"name": "tag_a", "definition": "a"}]
+    seed = {"r1": "seeded r1", "r2": "seeded r2"}  # r3 missing
+    fake_d = make_fake_distill()
+    g = build_bootstrap_graph(memory_checkpointer(),
+                              distill_fn=fake_d,
+                              synthesize_fn=fake_synthesize_seq([vocab]),
+                              reverse_check_fn=fake_reverse_check,
+                              records_loader_fn=fake_load_records)
+    r = g.invoke({"db_path": "fake.db", "auto_accept": True, "themes_seed": seed},
+                 {"configurable": {"thread_id": "t9"}})
+    seen_ids = [rec["record_id"] for rec in fake_d._seen_records]
+    assert seen_ids == ["r3"], f"distill should only see r3, got {seen_ids}"
+    themes_dict = {t["record_id"]: t["theme"] for t in r["themes"]}
+    assert themes_dict["r1"] == "seeded r1"
+    assert themes_dict["r2"] == "seeded r2"
+    assert "r3" in themes_dict and "theme for r3" in themes_dict["r3"]
+
+
+@test
+def test_b10_themes_seed_empty_behaves_like_no_seed():
+    """Empty seed → all records distilled (regression check)."""
+    vocab = [{"name": "tag_a", "definition": "a"}]
+    fake_d = make_fake_distill()
+    g = build_bootstrap_graph(memory_checkpointer(),
+                              distill_fn=fake_d,
+                              synthesize_fn=fake_synthesize_seq([vocab]),
+                              reverse_check_fn=fake_reverse_check,
+                              records_loader_fn=fake_load_records)
+    g.invoke({"db_path": "fake.db", "auto_accept": True, "themes_seed": {}},
+             {"configurable": {"thread_id": "t10"}})
+    seen_ids = [rec["record_id"] for rec in fake_d._seen_records]
+    assert sorted(seen_ids) == ["r1", "r2", "r3"]
 
 
 @test
@@ -180,7 +272,8 @@ def test_b7_checkpointer_persists_state_across_invokes():
     g = build_bootstrap_graph(cp,
                               distill_fn=fake_distill,
                               synthesize_fn=fake_synthesize_seq([vocab]),
-                              reverse_check_fn=fake_reverse_check)
+                              reverse_check_fn=fake_reverse_check,
+                              records_loader_fn=fake_load_records)
     config = {"configurable": {"thread_id": "t7"}}
     r1 = g.invoke({"db_path": "fake.db"}, config)
     assert "__interrupt__" in r1
