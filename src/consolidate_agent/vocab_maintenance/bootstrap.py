@@ -130,33 +130,58 @@ def _distill_single_batch(
     distill_model,
     distill_prompt,
     total_batches: int,
+    *,
+    max_retries: int = 3,
 ) -> tuple[int, list[dict], float, str | None]:
-    """Run one distill batch. Thread-safe (no shared state mutation).
+    """Run one distill batch with retry. Thread-safe.
+
+    Retries up to `max_retries` times with exponential backoff on exception.
+    On persistent failure: returns placeholder entries (theme="" +
+    distill_failed=True) so the records aren't silently dropped — preserves
+    the themes ↔ records 1:1 invariant.
 
     Returns (batch_idx, themes_list, elapsed, error_str_or_None).
-    On failure: themes_list=[], error_str describes the exception.
     """
     t0 = time.perf_counter()
-    try:
-        messages = distill_prompt.invoke({
-            "batch_size": len(batch_records),
-            "records": format_records_for_distill(batch_records),
-        })
-        result: DistillBatchOutput = distill_model.invoke(messages)
-    except Exception as exc:  # noqa: BLE001
-        return batch_idx, [], time.perf_counter() - t0, str(exc)[:200]
+    last_err: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            messages = distill_prompt.invoke({
+                "batch_size": len(batch_records),
+                "records": format_records_for_distill(batch_records),
+            })
+            result: DistillBatchOutput = distill_model.invoke(messages)
+        except Exception as exc:  # noqa: BLE001 — log + retry
+            last_err = exc
+            if attempt < max_retries:
+                time.sleep(2 ** (attempt - 1))
+            continue
 
+        elapsed = time.perf_counter() - t0
+        themes_by_idx = {t.record_idx: t.theme for t in result.themes}
+        batch_out = [
+            {
+                "record_id": rec["record_id"],
+                "title": rec["title"],
+                "theme": themes_by_idx.get(rec_idx, "").strip(),
+                "distill_failed": False,
+            }
+            for rec_idx, rec in enumerate(batch_records, 1)
+        ]
+        return batch_idx, batch_out, elapsed, None
+
+    # All retries failed — emit placeholder entries (preserve 1:1, mark failure).
     elapsed = time.perf_counter() - t0
-    themes_by_idx = {t.record_idx: t.theme for t in result.themes}
-    batch_out = [
+    placeholder = [
         {
             "record_id": rec["record_id"],
             "title": rec["title"],
-            "theme": themes_by_idx.get(rec_idx, "").strip(),
+            "theme": "",
+            "distill_failed": True,
         }
-        for rec_idx, rec in enumerate(batch_records, 1)
+        for rec in batch_records
     ]
-    return batch_idx, batch_out, elapsed, None
+    return batch_idx, placeholder, elapsed, str(last_err)[:200]
 
 
 def distill_step(
