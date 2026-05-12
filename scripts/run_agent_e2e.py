@@ -25,6 +25,7 @@ from consolidate_agent.vocab_maintenance.measure import (
     load_records,
     reverse_check_subset,
 )
+from consolidate_agent.vocab_maintenance.network import TagRecordNetwork
 from consolidate_agent.vocab_maintenance.propose.new import propose_new_fn
 from consolidate_agent.vocab_maintenance.propose.merge import propose_merge_fn
 from consolidate_agent.vocab_maintenance.propose.deprecate import propose_deprecate_fn
@@ -37,26 +38,20 @@ BASE = Path(__file__).resolve().parents[1]
 
 
 def build_measure_fn(
+    network: TagRecordNetwork,
     db_path: Path,
-    cached_assignments_path: Path,
-    sample_size: int,
     concurrency: int = 10,
 ):
-    """Cache-driven measure_fn.
+    """Network-driven measure_fn (no LLM for initial / merge / deprecate).
 
-    Initial call (action=None): load cached assignments (no LLM).
+    Initial call (action=None): return network's current diagnostics + assignments.
     After merge/deprecate apply: zero LLM — apply.py has already updated
       assignments deterministically; we just re-aggregate diagnostics.
     After propose_new apply: LLM patch only the records that were `missing`
       in the previous round (the new tag may now cover them).
     """
-    cached = json.loads(cached_assignments_path.read_text(encoding="utf-8"))
     records_by_id = {r["record_id"]: r for r in load_records(db_path)}
-
-    # Sample cap: deterministic slice (sorted by record_id) so reruns are stable
-    if sample_size > 0 and sample_size < len(cached):
-        cached = sorted(cached, key=lambda a: a["record_id"])[:sample_size]
-    print(f"  [measure] loaded {len(cached)} cached assignments", flush=True)
+    print(f"  [measure] network has {len(network.assignments)} assignments, {len(network.vocab)} tags", flush=True)
 
     def _patch_missing_with_new_vocab(vocab, previous_assignments, current_assignments):
         """For propose_new: re-LLM the records that were `missing` last round."""
@@ -78,32 +73,14 @@ def build_measure_fn(
         delta_by_id = {a["record_id"]: a for a in delta}
         return [delta_by_id.get(a["record_id"], a) for a in current_assignments]
 
-    def _align_to_vocab(assignments, vocab):
-        """Drop tags not in vocab (cache may be from older vocab snapshot).
-        Records with all tags dropped become missing."""
-        vocab_names = {t["name"] for t in vocab}
-        dropped = 0
-        for a in assignments:
-            original = a.get("selected_tags", []) or []
-            filtered = [t for t in original if t["name"] in vocab_names]
-            if len(filtered) < len(original):
-                dropped += len(original) - len(filtered)
-            a["selected_tags"] = filtered
-            if not filtered and not a.get("missing"):
-                a["missing"] = True
-                a["missing_concept"] = a.get("missing_concept") or "all selected_tags absent from current vocab"
-        if dropped:
-            print(f"  [measure] dropped {dropped} cached tag refs absent from current vocab", flush=True)
-        return assignments
-
     def measure_fn(vocab: list[dict], **ctx):
         action = ctx.get("action")
         current_assignments = ctx.get("current_assignments")
         previous_assignments = ctx.get("previous_assignments")
 
         if action is None:
-            # Initial call: load cache + drop tags not in current vocab.
-            assignments = _align_to_vocab([dict(a) for a in cached], vocab)
+            # Initial call: use network's snapshot directly (no LLM).
+            assignments = [dict(a) for a in network.assignments]
         elif action == "propose_new":
             assignments = _patch_missing_with_new_vocab(
                 vocab, previous_assignments or [], list(current_assignments or [])
@@ -148,30 +125,46 @@ def serialize_state_history(history) -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--vocab", default="outputs/tag_extraction_v2_vocab_v1.1.json", type=Path)
+    parser.add_argument("--network", default="outputs/network.json", type=Path,
+                        help="path to canonical TagRecordNetwork snapshot")
     parser.add_argument("--db", default="outputs/knowledge.db", type=Path)
     parser.add_argument(
-        "--cached-assignments",
+        "--legacy-vocab",
+        default="outputs/tag_extraction_v2_vocab_v1.1.json",
+        type=Path,
+        help="(migration only) legacy vocab file — used if --network doesn't exist",
+    )
+    parser.add_argument(
+        "--legacy-assignments",
         default="outputs/full_assignment/reverse_check_assignments.json",
         type=Path,
-        help="prior full reverse_check output — used as initial assignment snapshot",
+        help="(migration only) legacy assignments file — used if --network doesn't exist",
     )
     parser.add_argument("--output-dir", default="outputs/agent_e2e", type=Path)
     parser.add_argument("--max-iter", default=3, type=int)
-    parser.add_argument("--sample-size", default=0, type=int, help="cap on cached records (0 = use all)")
     parser.add_argument("--concurrency", default=10, type=int)
     args = parser.parse_args()
-
-    initial_vocab = json.loads(args.vocab.read_text(encoding="utf-8"))["vocab"]
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Load network (or migrate from legacy split files on first run)
+    if args.network.exists():
+        network = TagRecordNetwork.load(args.network)
+        print(f"  loaded network from {args.network}")
+    else:
+        print(f"  network not found at {args.network}, migrating from legacy files…")
+        network = TagRecordNetwork.from_legacy_files(args.legacy_vocab, args.legacy_assignments)
+        network.save(args.network)
+        print(f"  migrated → saved to {args.network}")
+
+    initial_vocab_size = len(network.vocab)
+    initial_assignment_count = len(network.assignments)
+
     print(f"=== Agent E2E ===")
-    print(f"  vocab: {args.vocab.name} ({len(initial_vocab)} tags)")
-    print(f"  cache: {args.cached_assignments.name}  sample_cap: {args.sample_size or 'full'}  concurrency: {args.concurrency}")
-    print(f"  max_iter: {args.max_iter}")
+    print(f"  network: vocab={initial_vocab_size} tags, assignments={initial_assignment_count} records")
+    print(f"  concurrency: {args.concurrency}  max_iter: {args.max_iter}")
     print()
 
-    measure_fn = build_measure_fn(args.db, args.cached_assignments, args.sample_size, args.concurrency)
+    measure_fn = build_measure_fn(network, args.db, args.concurrency)
     propose_fns = build_propose_fns(args.db)
 
     agent = Agent(
@@ -182,16 +175,27 @@ def main():
     )
 
     t0 = time.perf_counter()
-    state, status = agent.run(initial_vocab)
+    state, status = agent.run(network.vocab)
     elapsed = time.perf_counter() - t0
+
+    # Mirror final agent state back into network and persist atomically
+    network.vocab = state.vocab
+    network.assignments = state.assignments
+    network.metadata["last_agent_run"] = {
+        "status": status.value,
+        "iter": state.iter,
+        "elapsed_seconds": round(elapsed, 1),
+    }
+    network.save(args.network)
 
     # Print summary
     print(f"\n{'='*60}\n=== Final ===\n{'='*60}")
     print(f"status: {status}")
     print(f"iters:  {state.iter}")
     print(f"elapsed: {elapsed:.1f}s ({elapsed/60:.1f} min)")
-    print(f"vocab:  {len(initial_vocab)} → {len(state.vocab)} tags")
+    print(f"vocab:  {initial_vocab_size} → {len(state.vocab)} tags")
     print(f"blocked actions: {sorted(state.blocked_actions)}")
+    print(f"network saved → {args.network}")
     print()
     print("History:")
     for rec in state.history:
@@ -203,21 +207,18 @@ def main():
         if rec.decision and rec.decision.get("action_focus"):
             print(f"    focus: {rec.decision['action_focus'][:120]}")
 
-    # Save
+    # Run report (audit trail; the canonical state lives in --network)
     report = {
         "status": status.value,
         "iter": state.iter,
         "elapsed_seconds": round(elapsed, 1),
-        "initial_vocab_size": len(initial_vocab),
+        "initial_vocab_size": initial_vocab_size,
         "final_vocab_size": len(state.vocab),
         "blocked_actions": sorted(state.blocked_actions),
         "history": serialize_state_history(state.history),
     }
     (args.output_dir / "agent_run_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    (args.output_dir / "final_vocab.json").write_text(
-        json.dumps({"vocab": state.vocab}, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     print(f"\nReport → {args.output_dir / 'agent_run_report.json'}")
 
