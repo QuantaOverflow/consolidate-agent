@@ -42,17 +42,51 @@ class BatchAssignmentOutput(BaseModel):
     assignments: list[RecordAssignment]
 
 
-SYSTEM_PROMPT = """You're given a tag vocabulary and a batch of engineering knowledge records. For each record, select 1-3 tags from the vocabulary that best capture its content.
+SYSTEM_PROMPT = """You're given a tag vocabulary and a batch of engineering knowledge records. Your job: either ASSIGN existing tags or MARK MISSING. The choice is a SIGNAL to the vocab maintenance system.
 
-Selection rules:
-- Pick 1-3 tags ordered by relevance (most relevant first)
-- Use exact tag names from the vocabulary (case-sensitive)
-- Confidence levels:
-    - high: the tag clearly captures the record's core lesson
-    - medium: the tag captures part of the lesson or fits indirectly
-    - low: weak fit, only included because no better option exists
-- If NO tag in the vocab fits well at any confidence level → set missing=true, leave selected_tags=[], and describe in missing_concept what kind of tag is missing
-- Don't force-fit: missing=true is acceptable if vocab doesn't cover the record"""
+PRIMARY GOAL: surface vocab coverage gaps. Marking missing=true is the only way the system learns the vocab needs a new tag. Force-fitting a partially-related tag silences this signal and freezes vocab evolution.
+
+When to ASSIGN (selected_tags=[...], missing=false):
+  - A tag's DEFINITION explicitly names the concept the record teaches, OR
+  - A tag's definition includes the concept as a documented variant; the record adds nuance but stays within the tag's scope.
+
+When to MARK MISSING (selected_tags=[], missing=true):
+  - The record introduces a SPECIFIC concept the vocab only covers GENERICALLY (umbrella tags).
+  - The closest tag would only be at low/weak confidence.
+  - The record's lesson is a precise sub-pattern of a broader vocab tag, but the broader tag doesn't name this sub-pattern.
+
+Heuristic: if you can't write the record's lesson as a paraphrase of the tag's definition, prefer missing.
+
+Confidence levels:
+  - high: tag's definition explicitly names the record's core concept
+  - medium: tag's definition lists this concept as a documented variant
+  - DO NOT use low confidence — if your best match is only "low", that means the vocab is silent on this concept, so set missing=true instead.
+
+Output format:
+  - 1-3 tags ordered by relevance when assigning (single tag preferred when one fully covers the lesson)
+  - When missing, populate `missing_concept` with a precise 5-15 word description of what tag would fit. This drives propose_new.
+
+Examples:
+
+  Vocab: [resource_management(def: "controlling memory, CPU, network usage"), fallback_strategy(def: "graceful degradation paths")]
+  Record: "Token bucket algorithm caps API request rate at sustained level with burst allowance"
+  → missing=true. resource_management's definition lists memory/CPU/network — not rate limiting per se. The "token bucket" mechanism is a distinct pattern.
+  → missing_concept: "rate limiting mechanisms (token bucket, leaky bucket, distributed counters)"
+
+  Vocab: [authentication(def: "user identity verification including OAuth flows, token refresh, session lifecycle")]
+  Record: "OAuth refresh token rotation strategy"
+  → assign [authentication] at high. Definition explicitly names "OAuth flows, token refresh".
+
+  Vocab: [error_handling(def: "patterns for propagating, classifying, recovering from exceptions")]
+  Record: "429 Too Many Requests should trigger exponential backoff with jitter"
+  → missing=true. error_handling names "propagating exceptions"; backoff+jitter is a distinct concern (retry policy under rate limits).
+  → missing_concept: "retry policy with exponential backoff and jitter"
+
+  Vocab: [state_isolation(def: "preventing shared mutable state across execution contexts")]
+  Record: "Distributed rate limiting needs shared counter state across instances"
+  → missing=true. state_isolation is about PREVENTING shared state; this record is about COORDINATING shared state for rate limits. Opposite concern.
+  → missing_concept: "distributed coordination for shared counters/limits"
+"""
 
 
 USER_PROMPT = """## Vocabulary ({tag_count} tags)
