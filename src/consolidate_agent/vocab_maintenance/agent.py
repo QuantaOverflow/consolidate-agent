@@ -30,6 +30,7 @@ from .apply import (
     apply_proposal,
     check_invariants,
 )
+from .observability import get_default_logger
 
 
 ACTIONS = ("propose_new", "propose_merge", "propose_deprecate")
@@ -94,6 +95,8 @@ class Agent:
         self.disabled_actions: set[str] = set(disabled_actions or ())
 
     def run(self, initial_vocab: list[dict]) -> tuple[AgentState, FinalStatus]:
+        logger = get_default_logger()
+
         # Initial measure
         diag, assignments = self.measure_fn(initial_vocab)
         state = AgentState(
@@ -103,19 +106,34 @@ class Agent:
             blocked_actions=set(self.disabled_actions),
         )
         check_invariants(state.vocab, state.assignments)
+        logger.event(
+            "agent.run.start",
+            vocab_size=len(state.vocab),
+            assignments=len(state.assignments),
+            hit_rate=round(_hit_rate(diag), 4),
+            disabled_actions=sorted(self.disabled_actions),
+            max_iter=self.max_iter,
+        )
 
         while True:
             # Stop check: budget
             if state.iter >= self.max_iter:
+                logger.event("agent.run.done", status="max_iter_exhausted",
+                             iters=state.iter, vocab_size=len(state.vocab))
                 return state, FinalStatus.MAX_ITER_EXHAUSTED
 
             # Stop check: all actions blocked
             if state.blocked_actions.issuperset(ACTIONS):
+                logger.event("agent.run.done", status="no_actions_remaining",
+                             iters=state.iter, vocab_size=len(state.vocab))
                 return state, FinalStatus.NO_ACTIONS_REMAINING
 
             state.iter += 1
             rec = IterationRecord(iter=state.iter, action="", decision=None,
                                   hit_rate_before=_hit_rate(state.diagnostics))
+            logger.event("agent.iter.start", iter=state.iter,
+                         hit_rate=round(rec.hit_rate_before, 4),
+                         blocked=sorted(state.blocked_actions))
 
             try:
                 # Diagnose — pass blocked_actions so LLM avoids repeating choices
@@ -130,6 +148,9 @@ class Agent:
 
                 action = decision["next_action"]
                 focus = decision.get("action_focus", "")
+                logger.event("agent.iter.diagnose.done", iter=state.iter,
+                             action=action, focus=focus[:120],
+                             confidence=decision.get("confidence"))
 
                 # Done
                 if action == "done":
@@ -138,6 +159,9 @@ class Agent:
                     rec.hit_rate_after = rec.hit_rate_before
                     rec.blocked_actions_after = sorted(state.blocked_actions)
                     state.history.append(rec)
+                    logger.event("agent.iter.done", iter=state.iter, action="done", result="completed")
+                    logger.event("agent.run.done", status="completed",
+                                 iters=state.iter, vocab_size=len(state.vocab))
                     return state, FinalStatus.COMPLETED
 
                 # Skip blocked
@@ -169,6 +193,7 @@ class Agent:
                     rec.hit_rate_after = rec.hit_rate_before
                     rec.blocked_actions_after = sorted(state.blocked_actions)
                     state.history.append(rec)
+                    logger.event("agent.iter.done", iter=state.iter, action=action, result="blocked_empty")
                     continue
 
                 # Apply
@@ -183,6 +208,8 @@ class Agent:
                     rec.hit_rate_after = rec.hit_rate_before
                     rec.blocked_actions_after = sorted(state.blocked_actions)
                     state.history.append(rec)
+                    logger.event("agent.iter.done", iter=state.iter, action=action,
+                                 result="apply_error", error=rec.error)
                     continue
 
                 check_invariants(new_vocab, new_assignments)
@@ -206,7 +233,10 @@ class Agent:
                     rec.result = "rolled_back"
                     rec.blocked_actions_after = sorted(state.blocked_actions)
                     state.history.append(rec)
-                    # state.vocab/diagnostics/assignments unchanged
+                    logger.event("agent.iter.done", iter=state.iter, action=action,
+                                 result="rolled_back",
+                                 hit_rate_before=round(rec.hit_rate_before, 4),
+                                 hit_rate_after=round(rec.hit_rate_after, 4))
                     continue
 
                 # Commit
@@ -216,10 +246,22 @@ class Agent:
                 rec.result = "applied"
                 rec.blocked_actions_after = sorted(state.blocked_actions)
                 state.history.append(rec)
+                logger.event("agent.iter.done", iter=state.iter, action=action,
+                             result="applied",
+                             proposals=len(rec.proposals),
+                             vocab_size_after=len(state.vocab),
+                             hit_rate_before=round(rec.hit_rate_before, 4),
+                             hit_rate_after=round(rec.hit_rate_after, 4))
 
             except Exception as e:  # noqa: BLE001 — fatal path
                 rec.result = "fatal_error"
                 rec.error = f"{type(e).__name__}: {e}"
                 rec.blocked_actions_after = sorted(state.blocked_actions)
                 state.history.append(rec)
+                import traceback as _tb
+                logger.event("agent.iter.done", iter=state.iter, action=rec.action,
+                             result="fatal_error", error=rec.error,
+                             traceback=_tb.format_exc()[:1000])
+                logger.event("agent.run.done", status="fatal_error",
+                             iters=state.iter, vocab_size=len(state.vocab))
                 return state, FinalStatus.FATAL_ERROR

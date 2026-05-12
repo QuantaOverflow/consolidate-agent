@@ -26,6 +26,7 @@ from consolidate_agent.vocab_maintenance.measure import (
     reverse_check_subset,
 )
 from consolidate_agent.vocab_maintenance.network import TagRecordNetwork
+from consolidate_agent.vocab_maintenance.observability import RunLogger, set_default_logger
 from consolidate_agent.vocab_maintenance.propose.merge import propose_merge_fn
 from consolidate_agent.vocab_maintenance.propose.deprecate import propose_deprecate_fn
 
@@ -149,6 +150,13 @@ def main():
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Set up run log (one jsonl per invocation)
+    log_path = BASE / "outputs" / "runs" / f"{time.strftime('%Y-%m-%dT%H-%M-%S')}_agent_e2e.jsonl"
+    run_logger = RunLogger(log_path)
+    set_default_logger(run_logger)
+    run_logger.event("run.start", script="run_agent_e2e", network=str(args.network))
+    print(f"  run log → {log_path}")
+
     # Load network (or migrate from legacy split files on first run)
     if args.network.exists():
         network = TagRecordNetwork.load(args.network)
@@ -225,6 +233,8 @@ def main():
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     print(f"\nReport → {args.output_dir / 'agent_run_report.json'}")
+    run_logger.event("run.done", elapsed_s=round(elapsed, 1))
+    run_logger.close()
 
 
 if __name__ == "__main__":

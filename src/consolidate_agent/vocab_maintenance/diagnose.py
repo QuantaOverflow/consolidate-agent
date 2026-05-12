@@ -19,6 +19,7 @@ ALL_ACTIONS = ("propose_new", "propose_merge", "propose_deprecate")
 from consolidate_agent.config import Settings
 from consolidate_agent.consolidation._utils import _chat_model
 
+from .observability import get_default_logger, invoke_with_retry
 from .probes import run_probe
 from .similarity import find_similar_pairs
 
@@ -247,19 +248,23 @@ def diagnose(
         "similar_pairs": _similar_pairs_str(similar_pairs),
         "blocked_actions": blocked_str,
     })
-    plan: PlanOutput | None = plan_model.invoke(plan_msg)
+    logger = get_default_logger()
+
+    plan: PlanOutput | None = invoke_with_retry(
+        plan_model, plan_msg, retries=3, caller="diagnose.plan", logger=logger,
+    )
     if plan is None:
-        plan = plan_model.invoke(plan_msg)  # retry once
-    if plan is None:
-        raise ValueError("plan step returned None twice")
+        raise ValueError("plan step failed after 3 retries")
 
     # Step 2: execute probes
     findings: dict[str, dict] = {}
     for probe_call in plan.probe_calls_needed[:3]:
         try:
             findings[probe_call] = run_probe(probe_call, vocab, assignments, db_path)
+            logger.event("probe.ok", call=probe_call)
         except Exception as e:
             findings[probe_call] = {"error": str(e)}
+            logger.event("probe.error", call=probe_call, error=str(e)[:200])
 
     # Step 3: decide
     findings_str = json.dumps(findings, indent=2, ensure_ascii=False)[:6000]  # cap
@@ -268,11 +273,31 @@ def diagnose(
         "biases": plan.suspected_biases,
         "findings": findings_str,
     })
-    decision: BaseModel | None = decide_model.invoke(decide_msg)
+    decision = invoke_with_retry(
+        decide_model, decide_msg, retries=3, caller="diagnose.decide", logger=logger,
+    )
     if decision is None:
-        decision = decide_model.invoke(decide_msg)
-    if decision is None:
-        raise ValueError("decide step returned None twice")
+        # Fallback: terminate the loop cleanly rather than crash.
+        # Happens when LLM ignores the dynamic Literal schema (e.g., returns
+        # a blocked action despite the schema excluding it).
+        logger.event("diagnose.fallback_to_done", allowed_actions=list(allowed))
+        print(f"  [diagnose] LLM returned invalid action 3× — fallback to done", flush=True)
+        return {
+            "plan": plan.model_dump(),
+            "similar_pairs": similar_pairs,
+            "probe_calls": list(plan.probe_calls_needed[:3]),
+            "findings": findings,
+            "decision": {
+                "probe_findings_summary": "(LLM repeatedly returned invalid action despite schema)",
+                "bias_assessment": "",
+                "independence_check": "",
+                "confidence": "low",
+                "uncertainty_reasons": ["LLM ignored next_action schema constraint on all retries"],
+                "next_action": "done",
+                "action_focus": "",
+                "reasoning": "diagnose retries exhausted — terminating to avoid loop",
+            },
+        }
 
     return {
         "plan": plan.model_dump(),
