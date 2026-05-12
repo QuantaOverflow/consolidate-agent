@@ -31,6 +31,7 @@ from consolidate_agent.vocab_maintenance.network import TagRecordNetwork
 from consolidate_agent.vocab_maintenance.observability import RunLogger, set_default_logger
 from consolidate_agent.vocab_maintenance.propose.merge import propose_merge_fn
 from consolidate_agent.vocab_maintenance.propose.deprecate import propose_deprecate_fn
+from consolidate_agent.vocab_maintenance.propose.refine import propose_refine_fn
 
 
 BASE = Path(__file__).resolve().parents[1]
@@ -109,14 +110,16 @@ def build_health_fn(db_path: Path):
 
 
 def build_propose_fns(db_path: Path):
-    """Maintenance agent's tool kit: merge + deprecate only.
+    """Maintenance agent's tool kit: merge + deprecate + refine.
 
     propose_new is intentionally absent — vocab growth belongs to ingest_batch,
     not to the maintenance loop. Maintenance is consolidation-only.
+    propose_refine sharpens a tag's definition + prunes <=10 misfit records.
     """
     return {
         "propose_merge": lambda v, a, f: propose_merge_fn(v, a, f, db_path=db_path),
         "propose_deprecate": lambda v, a, f: propose_deprecate_fn(v, a, f, db_path=db_path),
+        "propose_refine": lambda v, a, f: propose_refine_fn(v, a, f, db_path=db_path),
     }
 
 

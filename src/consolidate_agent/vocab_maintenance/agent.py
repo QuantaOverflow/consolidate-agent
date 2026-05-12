@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Callable
 
 
-ACTIONS = ("propose_new", "propose_merge", "propose_deprecate")
+ACTIONS = ("propose_new", "propose_merge", "propose_deprecate", "propose_refine")
 
 
 class FinalStatus(str, Enum):

@@ -52,7 +52,7 @@ from ..observability import get_default_logger
 from .state import AgentLoopState
 
 
-ACTIONS = ("propose_new", "propose_merge", "propose_deprecate")
+ACTIONS = ("propose_new", "propose_merge", "propose_deprecate", "propose_refine")
 _DIM_NAMES = ("coverage", "coherence", "distinctness", "granularity", "multi_axis")
 _ZERO_DELTA = {k: 0.0 for k in _DIM_NAMES}
 

@@ -14,7 +14,7 @@ from typing import Literal
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field, create_model
 
-ALL_ACTIONS = ("propose_new", "propose_merge", "propose_deprecate")
+ALL_ACTIONS = ("propose_new", "propose_merge", "propose_deprecate", "propose_refine")
 
 from consolidate_agent.config import Settings
 from consolidate_agent.consolidation._utils import _chat_model
@@ -116,7 +116,7 @@ tag size distribution (bottom 5, excluding 0):
 
 Plan probes to verify suspicious signals. Pay attention to suspected redundancy pairs — if any pair has high def similarity, probe it before deciding action.
 
-If "Forced-fit candidates" has entries → probe each with `inspect_outliers(name=X, n=5)` to see which specific records dragged the mean down.
+If "Forced-fit candidates" has entries → probe each with `inspect_outliers(name=X, n=5)` to see which specific records dragged the mean down. If the bottom-fit records under tag X are semantically off-topic (the tag is acting as an umbrella for unrelated stuff), the action is `propose_refine` with focus=X — it sharpens the def and prunes the misfit records.
 If orphan rate > 15% (vocab gap) OR no other signal stands out (sanity sweep when vocab looks healthy) → run `find_orphan_themes(n=10)` once to catch what the LLM-based signals miss.
 
 Blocked actions are not in your decision schema this round; you can only choose among remaining actions or 'done'. Plan probes accordingly — don't probe signals that only support a blocked action."""
@@ -188,6 +188,7 @@ _DECIDE_RULES = {
     "propose_new": "- propose_new: only if probes confirm genuine missing concepts (not LLM false positives)",
     "propose_merge": "- propose_merge: only if probes confirm two tags describe the same concept (subsumption, not just relatedness)",
     "propose_deprecate": "- propose_deprecate: if a tag is truly unused or its records all fit a single other tag better",
+    "propose_refine": "- propose_refine: if a tag's `forced_fit_candidates` entry shows mean_fit < 0.5 AND inspect_outliers reveals records that semantically don't belong under it; this action sharpens the definition and prunes <=10 misfit records (the records are detached, not deleted — they'll be re-evaluated next iter)",
     "done": "- done: if probes show the vocab is in good shape",
 }
 

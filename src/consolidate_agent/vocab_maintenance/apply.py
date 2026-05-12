@@ -37,6 +37,22 @@ class DeprecateProposal:
     type: str = "deprecate"
 
 
+@dataclass(frozen=True)
+class RefineTagProposal:
+    """Update a tag's definition AND detach a small set of records that don't fit.
+
+    The cosine-distance invariant ("prune targets sit far from the new
+    definition") is enforced at proposal construction time in
+    `propose/refine.py:validate_refine_proposal`, because apply.py is pure
+    data and has no path to record content embeddings.
+    """
+    tag: str
+    new_definition: str
+    prune_record_ids: tuple[str, ...] = ()  # tuple so the dataclass is hashable
+
+    type: str = "refine"
+
+
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
 
@@ -140,18 +156,76 @@ def _apply_deprecate(
     return new_vocab, new_assignments
 
 
+_REFINE_PRUNE_HARD_CAP = 10
+
+
+def _apply_refine(
+    vocab: list[dict], assignments: list[dict], p: RefineTagProposal
+) -> tuple[list[dict], list[dict]]:
+    """Update tag definition + detach prune-listed records from that tag.
+
+    Structural invariants enforced:
+      I-R1: tag exists in vocab
+      I-R2: prune list size <= _REFINE_PRUNE_HARD_CAP (==10)
+      I-R3: every prune target currently carries `tag`
+      I-R4: no record becomes orphan (loses all tags) after prune
+    """
+    names = {t["name"] for t in vocab}
+    if p.tag not in names:
+        raise InvalidProposal(f"refine target '{p.tag}' not in vocab")
+    if len(p.prune_record_ids) > _REFINE_PRUNE_HARD_CAP:
+        raise InvalidProposal(
+            f"refine prune list too large: {len(p.prune_record_ids)} > {_REFINE_PRUNE_HARD_CAP}"
+        )
+
+    prune_set = set(p.prune_record_ids)
+
+    orphans: list[str] = []
+    for a in assignments:
+        if a.get("missing"):
+            continue
+        if a["record_id"] not in prune_set:
+            continue
+        current = [t["name"] for t in a.get("selected_tags", [])]
+        if p.tag not in current:
+            raise InvalidProposal(
+                f"refine: record {a['record_id']} not tagged with '{p.tag}', cannot prune"
+            )
+        if not [n for n in current if n != p.tag]:
+            orphans.append(a["record_id"])
+    if orphans:
+        raise OrphanError(
+            f"refining '{p.tag}' would orphan {len(orphans)} record(s): {orphans}",
+            orphan_record_ids=orphans,
+        )
+
+    new_vocab = [
+        {**t, "definition": p.new_definition} if t["name"] == p.tag else t
+        for t in vocab
+    ]
+    new_assignments = []
+    for a in assignments:
+        if a.get("missing") or a["record_id"] not in prune_set:
+            new_assignments.append(a)
+            continue
+        filtered = [t for t in a["selected_tags"] if t["name"] != p.tag]
+        new_assignments.append(dict(a, selected_tags=filtered))
+    return new_vocab, new_assignments
+
+
 def apply_proposal(
     vocab: list[dict],
     assignments: list[dict],
-    proposal: NewTagProposal | MergeProposal | DeprecateProposal,
+    proposal: NewTagProposal | MergeProposal | DeprecateProposal | RefineTagProposal,
 ) -> tuple[list[dict], list[dict]]:
     """Apply proposal, returning new (vocab, assignments).
 
     Pure function — does not mutate inputs. Caller responsible for persistence.
 
     Raises:
-        InvalidProposal: proposal references nonexistent tag, self-merge, name collision
-        OrphanError: deprecate would orphan one or more records
+        InvalidProposal: nonexistent tag, self-merge, name collision, refine
+            tag mismatch / size violation
+        OrphanError: deprecate or refine would orphan one or more records
     """
     if isinstance(proposal, NewTagProposal):
         return _apply_new(vocab, assignments, proposal)
@@ -159,6 +233,8 @@ def apply_proposal(
         return _apply_merge(vocab, assignments, proposal)
     if isinstance(proposal, DeprecateProposal):
         return _apply_deprecate(vocab, assignments, proposal)
+    if isinstance(proposal, RefineTagProposal):
+        return _apply_refine(vocab, assignments, proposal)
     raise InvalidProposal(f"unknown proposal type: {type(proposal).__name__}")
 
 

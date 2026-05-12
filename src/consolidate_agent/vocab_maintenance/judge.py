@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from consolidate_agent.config import Settings
 from consolidate_agent.consolidation._utils import _chat_model
 
-from .apply import DeprecateProposal, MergeProposal, NewTagProposal
+from .apply import DeprecateProposal, MergeProposal, NewTagProposal, RefineTagProposal
 from .observability import get_default_logger, invoke_with_retry
 
 
@@ -68,10 +68,17 @@ propose_deprecate:
   - Multi_axis drop > 0.10 means too many records lost their only secondary tag.
   - Granularity: ignore.
 
-propose_new / propose_refine (future):
+propose_new:
   - Coverage expected to rise or be flat.
   - Coherence may shift either direction; drop > 0.05 is suspicious.
-  - Distinctness drop > 0.05 suggests the new/refined tag overlaps with an existing one.
+  - Distinctness drop > 0.05 suggests the new tag overlaps with an existing one.
+
+propose_refine:
+  - Coverage drop <= 0.02 is expected (the prune list detaches <=10 records from the refined tag).
+  - Coherence is expected to RISE (the whole point of refine is to tighten the tag's semantic fit). Coherence drop > 0.01 is a red flag for refine specifically.
+  - Distinctness is expected to rise slightly or stay flat; drop > 0.03 means the refined definition wandered into a neighbor tag's territory.
+  - Multi_axis drop > 0.05 is suspicious (refine should not strip secondary tags from non-pruned records).
+  - Granularity: ignore.
 
 Other notes:
 - A "small" delta (< 0.01 in absolute value) on any dim is noise; do not cite it.
@@ -112,6 +119,12 @@ def summarize_proposals(proposals: list) -> str:
             lines.append(f"- deprecate: '{p.tag}'")
         elif isinstance(p, NewTagProposal):
             lines.append(f"- new: '{p.name}' — {p.definition[:120]}")
+        elif isinstance(p, RefineTagProposal):
+            lines.append(
+                f"- refine: '{p.tag}', prune {len(p.prune_record_ids)} record(s) "
+                f"({list(p.prune_record_ids)[:3]}{'...' if len(p.prune_record_ids) > 3 else ''}), "
+                f"new_def='{p.new_definition[:120]}'"
+            )
         else:
             lines.append(f"- {type(p).__name__}: {p}")
     return "\n".join(lines)

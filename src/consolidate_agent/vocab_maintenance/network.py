@@ -150,6 +150,12 @@ def _describe_proposal(proposal: Any) -> tuple[str, list[str], dict]:
         }
     if cls_name == "DeprecateProposal":
         return "apply_deprecate", [proposal.tag], {"tag": proposal.tag}
+    if cls_name == "RefineTagProposal":
+        return "apply_refine", [proposal.tag], {
+            "tag": proposal.tag,
+            "new_definition": proposal.new_definition,
+            "prune_record_ids": list(proposal.prune_record_ids),
+        }
     return "apply_unknown", [], {"type": cls_name}
 
 
