@@ -78,13 +78,31 @@ class Agent:
 
     def __init__(
         self,
-        measure_fn: Callable[[list[dict]], tuple[dict, list[dict]]],
-        diagnose_fn: Callable[[list[dict], dict, list[dict]], dict],
+        measure_fn: Callable[..., tuple[dict, list[dict]]],
+        diagnose_fn: Callable[..., dict],
         propose_fns: dict[str, Callable[..., list]],
         max_iter: int = 5,
         hit_rate_regression_threshold: float = 0.03,
         disabled_actions: set[str] | frozenset[str] | None = None,
     ):
+        """Agent loop.
+
+        measure_fn signature contract (consistent across all call sites):
+            measure_fn(
+                vocab: list[dict],
+                *,
+                action: str | None,                 # None on initial call; 'propose_*' post-apply
+                current_assignments: list[dict] | None,  # None on initial; apply.py output post-apply
+                previous_assignments: list[dict] | None, # None on initial; pre-apply state post-apply
+            ) -> tuple[diagnostics_dict, assignments_list]
+
+        diagnose_fn signature contract:
+            diagnose_fn(
+                vocab, diagnostics, assignments,
+                *,
+                blocked_actions: list[str],
+            ) -> dict (with "decision" key or decision itself)
+        """
         self.measure_fn = measure_fn
         self.diagnose_fn = diagnose_fn
         self.propose_fns = propose_fns
@@ -97,8 +115,14 @@ class Agent:
     def run(self, initial_vocab: list[dict]) -> tuple[AgentState, FinalStatus]:
         logger = get_default_logger()
 
-        # Initial measure
-        diag, assignments = self.measure_fn(initial_vocab)
+        # Initial measure — pass full ctx (None values) so measure_fn always
+        # sees a consistent signature.
+        diag, assignments = self.measure_fn(
+            initial_vocab,
+            action=None,
+            current_assignments=None,
+            previous_assignments=None,
+        )
         state = AgentState(
             vocab=list(initial_vocab),
             assignments=list(assignments),
