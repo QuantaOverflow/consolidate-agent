@@ -55,6 +55,10 @@ For each record (by record_idx 1..{batch_size}), output the theme sentence."""
 class TagDefinition(BaseModel):
     name: str = Field(description="snake_case, 1-2 words")
     definition: str = Field(description="one sentence")
+    theme_indices: list[int] = Field(
+        default_factory=list,
+        description="0-based theme indices in the input list that belong to this tag",
+    )
 
 
 class SynthesizeOutput(BaseModel):
