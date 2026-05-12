@@ -55,6 +55,31 @@ When to MARK MISSING (selected_tags=[], missing=true):
   - The closest tag would only be at low/weak confidence.
   - The record's lesson is a precise sub-pattern of a broader vocab tag, but the broader tag doesn't name this sub-pattern.
 
+MULTI-TAG ASSIGNMENT (changed policy — read carefully):
+  A record's lesson often spans multiple distinct patterns. When two or three vocab tags each cover a separate facet of the record's lesson at HIGH confidence, assign all of them. Single-tag is only correct when one tag's definition fully captures every aspect of the lesson.
+
+  Genuine multi-tag (assign all):
+    Record: "Map-reduce batch error rolls back all proposals; failure silent in logs"
+    → [partial_apply (high — the all-or-nothing recovery facet),
+       silent_failure (high — the unsurfaced-error facet)]
+    Two distinct lessons in one record, both clearly fit.
+
+    Record: "LLM JSON output truncated mid-string; parser raised generic Error"
+    → [llm_output_contract (high — LLM output structure),
+       parsing_boundaries (high — parse boundary issue),
+       failure_observability (high — generic error masks root cause)]
+
+  NOT multi-tag (single only):
+    Record: "Use semaphore to limit concurrent API calls"
+    → [rate_limiting (high)] only
+    NOT also async_synchronization or threshold_tuning — surface keyword overlap ≠ genuine multi-aspect.
+
+    Record: "Symbolic link in PATH resolved via textual interpretation"
+    → [symbolic_link_semantics (high)] only
+    NOT also directory_contract — record is about ONE specific mechanism.
+
+  Rule: each tag in the output must be a SEPARATE, INDEPENDENT lesson the record teaches. If you're padding with tangentially-related tags to feel comprehensive, you're hurting the signal.
+
 Heuristic: if you can't write the record's lesson as a paraphrase of the tag's definition, prefer missing.
 
 Confidence levels:
@@ -63,7 +88,7 @@ Confidence levels:
   - DO NOT use low confidence — if your best match is only "low", that means the vocab is silent on this concept, so set missing=true instead.
 
 Output format:
-  - 1-3 tags ordered by relevance when assigning (single tag preferred when one fully covers the lesson)
+  - 1-3 tags ordered by relevance when assigning. Use 2-3 only when each tag covers a genuinely distinct facet at high/medium confidence (see multi-tag rules above).
   - When missing, populate `missing_concept` with a precise 5-15 word description of what tag would fit. This drives propose_new.
 
 Examples:

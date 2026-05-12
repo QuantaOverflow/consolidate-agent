@@ -194,6 +194,74 @@ aggressively — relax the prompt.
 
 ---
 
+## 11. `propose_new` has no near-duplicate safety net against existing vocab
+
+**Path**: `propose/new.py` — `propose_new_fn`
+
+**Status**: NOT IMPLEMENTED.
+
+`propose_new` shows the existing vocab to the LLM in its synthesize prompt
+and instructs it to "fill gaps, don't recreate". This is a soft guard.
+There is no deterministic check that a candidate tag isn't a near-duplicate
+of an existing one before it lands in vocab.
+
+**Why this matters**: bootstrap uses `synthesize_via_clustering` (BERTopic
+style) producing 49 specific tags. `propose_new` is single-shot LLM with
+the existing vocab as context. The architectures differ, so naming style
+can drift across runs. Over many ingest cycles, near-duplicates accumulate.
+
+**Compounding gap**: the maintenance agent's `diagnose` is signal-based
+(probes low-usage or high-cooccur tags). A propose_new-introduced
+near-duplicate that lands with moderate usage and zero co-occurrence with
+its sibling will NEVER be probed and will silently rot the vocab.
+
+**Validated this gap**: 2026-05-13 isolated ingest sim added
+`rate_limiting_contract` (23 records) — manual `judge_pair` against the
+closest existing tag `defensive_integration` (8 records) returned
+`keep_distinct`, BUT they have 0 co-occurrence so agent's signal-based
+diagnose never probed them. This time the new tag was legitimately
+distinct, but the structural blind spot remains.
+
+**Fix sketch** (~half day):
+
+```python
+# inside propose_new_fn, after synthesize:
+from ..similarity import _embed, cosine
+vocab_embeds = {t["name"]: _embed(t["name"] + ": " + t["definition"])
+                for t in vocab}
+filtered = []
+for cand in synthesized:
+    cv = _embed(cand.name + ": " + cand.definition)
+    max_sim, closest = max(
+        ((cosine(cv, v), name) for name, v in vocab_embeds.items()),
+        default=(0, None),
+    )
+    if max_sim < 0.75:
+        filtered.append(cand)
+        continue
+    # high similarity → LLM binary check
+    if llm_judge_truly_new(cand, vocab_lookup(closest)):
+        filtered.append(cand)
+    else:
+        logger.event("propose_new.rejected_as_duplicate",
+                     candidate=cand.name, closest=closest, similarity=max_sim)
+return filtered
+```
+
+**Defer trigger** (when to actually implement):
+
+1. First time a propose_new-introduced tag is observed to cooccur > 5
+   with an existing tag — that's empirical proof of redundancy entering
+   via ingest.
+2. Or vocab crosses 100 tags (entering risk window for accumulated drift).
+3. Or audit shows propose_new tag naming visibly diverging from cluster
+   bootstrap naming style.
+
+Until one of these triggers, the soft prompt guard plus low ingest
+frequency keep risk acceptable.
+
+---
+
 ## Stability of LLM-driven steps — observed run-to-run variability
 
 3 ingest iterations on identical fake corpus + identical seed (insofar as
