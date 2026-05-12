@@ -77,46 +77,71 @@ class TagRecordNetwork:
         *,
         batch_size: int = 30,
         concurrency: int = 10,
+        on_vocab_review: Callable[[list[dict]], str] | None = None,
+        thread_id: str | None = None,
+        checkpoint_db: Path | None = None,
     ) -> "TagRecordNetwork":
-        """Build a fresh network from raw records.
+        """Build a fresh network from raw records via LangGraph state machine.
 
-        Phase A: records → distill themes → synthesize vocab → reverse_check
-                 → initial assignments → Network.
+        Phase A pipeline:
+          records → distill themes → synthesize vocab → [HITL gate] → reverse_check → Network
+
+        Args:
+            db_path: source SQLite of records.
+            batch_size: distill batch size.
+            concurrency: ThreadPool workers for reverse_check.
+            on_vocab_review: optional callback called after each synthesize attempt.
+                Must return "accept" / "regenerate" / "abort". If None, auto-accept
+                (unattended mode).
+            thread_id: LangGraph thread id for checkpointing. Auto-generated if None.
+            checkpoint_db: SQLite path for checkpoints (default outputs/checkpoints.db).
+                Persists run state so crashed bootstrap can resume via bootstrap_resume.
 
         Long-running (LLM-heavy, ~5-10 min on ~700 records).
+
+        Raises:
+            ValueError: if user chose "abort" at the review gate.
         """
-        # Lazy imports to avoid LLM-dep load when only using load/save/apply
-        from consolidate_agent.config import Settings
-        from consolidate_agent.consolidation._utils import _chat_model
+        from langgraph.types import Command
 
-        from .bootstrap import distill_step, synthesize_step
-        from .measure import load_records, reverse_check_subset
+        from .graphs.bootstrap import build_bootstrap_graph
+        from .graphs.checkpointer import sqlite_checkpointer
 
-        settings = Settings()
+        if checkpoint_db is None:
+            checkpoint_db = Path("outputs/checkpoints.db")
+        if thread_id is None:
+            thread_id = f"bootstrap-{int(time.time())}"
 
-        def model_factory():
-            return _chat_model(settings)
+        config = {"configurable": {"thread_id": thread_id}}
+        initial_state = {
+            "db_path": str(db_path),
+            "batch_size": batch_size,
+            "concurrency": concurrency,
+            "auto_accept": on_vocab_review is None,
+        }
 
-        records = load_records(db_path)
-        print(f"[bootstrap] loaded {len(records)} records from {db_path.name}", flush=True)
+        with sqlite_checkpointer(checkpoint_db) as cp:
+            graph = build_bootstrap_graph(cp)
+            print(f"[bootstrap] thread_id={thread_id}, checkpoint={checkpoint_db.name}", flush=True)
 
-        log_sink = io.StringIO()  # discard structured log (caller can re-run with log_path if needed)
+            result = graph.invoke(initial_state, config)
+            while "__interrupt__" in result:
+                ipt = result["__interrupt__"][0]
+                payload = ipt.value
+                if payload.get("stage") == "vocab_review":
+                    decision = on_vocab_review(payload["vocab"]) if on_vocab_review else "accept"
+                else:
+                    decision = "accept"
+                result = graph.invoke(Command(resume=decision), config)
 
-        # Step 1: per-record themes
-        themes = distill_step(model_factory, records, batch_size, log_sink)
-        # Step 2: cluster themes into vocab
-        syn_result = synthesize_step(model_factory, themes, log_sink)
-        vocab = syn_result["vocab"]
-        print(f"[bootstrap] vocab: {len(vocab)} tags", flush=True)
+            if result.get("abort_reason"):
+                raise ValueError(f"bootstrap aborted: {result['abort_reason']}")
 
-        # Step 3: reverse_check on all records → initial assignments
-        print(f"[bootstrap] reverse_check on {len(records)} records (concurrency={concurrency})", flush=True)
-        assignments = reverse_check_subset(records, vocab, batch_size=10, concurrency=concurrency)
+            vocab = result["vocab"]
+            assignments = result["assignments"]
 
-        # Guard: LLM occasionally outputs tag names outside vocab (~3%)
-        dropped = _filter_dangling_refs(assignments, vocab)
-        if dropped:
-            print(f"[bootstrap] filtered {dropped} vocab-external tag refs", flush=True)
+        if result.get("fake_tag_drops", 0):
+            print(f"[bootstrap] filtered {result['fake_tag_drops']} vocab-external tag refs", flush=True)
 
         now = time.time()
         metadata = {
@@ -125,9 +150,10 @@ class TagRecordNetwork:
             "created_at": now,
             "last_modified": now,
             "bootstrap_source": str(db_path),
-            "synthesize_notes": syn_result.get("notes", ""),
+            "synthesize_notes": result.get("synthesize_notes", ""),
+            "bootstrap_thread_id": thread_id,
+            "synthesize_attempts": result.get("synthesize_attempts", 1),
         }
-
         network = cls(vocab=vocab, assignments=assignments, metadata=metadata)
         network.validate()
         return network
