@@ -104,6 +104,99 @@ def inspect_tag(
     }
 
 
+def inspect_outliers(
+    vocab: list[dict], assignments: list[dict], db_path: Path, name: str, n: int = 5
+) -> dict:
+    """For records under `name`, return n records with lowest cosine(insight, tag_def).
+
+    Targets expand_coverage false positives: records mechanically attached via
+    embedding+LLM that are semantically far from the tag definition. Sort by
+    similarity ascending — the bottom of this list is the audit candidate set.
+    """
+    from .similarity import _embed, cosine
+
+    tag = next((t for t in vocab if t["name"] == name), None)
+    if not tag:
+        return {"error": f"tag {name} not in vocab"}
+    tag_emb = _embed(tag["definition"])
+
+    record_ids = [
+        a["record_id"] for a in assignments
+        if not a.get("missing") and any(t["name"] == name for t in a.get("selected_tags", []))
+    ]
+    details = _load_record_details(db_path, record_ids)
+
+    scored: list[dict] = []
+    for rid in record_ids:
+        d = details.get(rid)
+        if not d:
+            continue
+        text = f"{d['title']}: {d['insight'][:200]}"
+        sim = cosine(tag_emb, _embed(text))
+        scored.append({
+            "record_id": rid,
+            "title": d["title"],
+            "insight": d["insight"][:200],
+            "similarity": round(sim, 3),
+        })
+    scored.sort(key=lambda x: x["similarity"])
+    return {
+        "tag": name,
+        "definition": tag["definition"],
+        "record_count": len(scored),
+        "bottom_n_by_fit": scored[:n],
+    }
+
+
+def find_orphan_themes(
+    vocab: list[dict], assignments: list[dict], db_path: Path,
+    n: int = 10, max_sample: int = 200,
+) -> dict:
+    """For up to max_sample records, return n with lowest max cosine to any vocab tag.
+
+    Two failure modes surface:
+    1. Vocab gap: record's max_sim to all tags is low → genuine missing concept.
+    2. Reverse_check error: assigned record has high sim to a DIFFERENT tag than
+       its current selection → either FP attachment or missing co-tag.
+
+    Caller reads `current_tags` vs `closest_tag` to distinguish.
+    """
+    from .similarity import _embed, cosine
+
+    if not vocab or not assignments:
+        return {"sampled": 0, "bottom_n_orphans": []}
+
+    sampled = assignments[:max_sample]
+    record_ids = [a["record_id"] for a in sampled]
+    details = _load_record_details(db_path, record_ids)
+    tag_embs = [(t["name"], _embed(t["definition"])) for t in vocab]
+
+    results: list[dict] = []
+    for a in sampled:
+        rid = a["record_id"]
+        d = details.get(rid)
+        if not d:
+            continue
+        text = f"{d['title']}: {d['insight'][:200]}"
+        rec_emb = _embed(text)
+        sims = sorted(
+            ((name, cosine(rec_emb, te)) for name, te in tag_embs),
+            key=lambda x: -x[1],
+        )
+        max_sim = sims[0][1] if sims else 0.0
+        closest = sims[0][0] if sims else ""
+        results.append({
+            "record_id": rid,
+            "title": d["title"],
+            "max_sim": round(max_sim, 3),
+            "closest_tag": closest,
+            "current_tags": [t["name"] for t in a.get("selected_tags", [])],
+            "missing": bool(a.get("missing", False)),
+        })
+    results.sort(key=lambda x: x["max_sim"])
+    return {"sampled": len(results), "bottom_n_orphans": results[:n]}
+
+
 def compare_tag_records(
     vocab: list[dict], assignments: list[dict], db_path: Path, tag_a: str, tag_b: str
 ) -> dict:
@@ -159,6 +252,8 @@ PROBES = {
     "inspect_missing_records": inspect_missing_records,
     "inspect_cooccur_pair": inspect_cooccur_pair,
     "inspect_tag": inspect_tag,
+    "inspect_outliers": inspect_outliers,
+    "find_orphan_themes": find_orphan_themes,
     "compare_tag_records": compare_tag_records,
 }
 
@@ -194,6 +289,10 @@ def run_probe(probe_call: str, vocab: list[dict], assignments: list[dict], db_pa
     elif func_name == "inspect_cooccur_pair":
         return func(assignments, db_path, **kwargs)
     elif func_name == "inspect_tag":
+        return func(vocab, assignments, db_path, **kwargs)
+    elif func_name == "inspect_outliers":
+        return func(vocab, assignments, db_path, **kwargs)
+    elif func_name == "find_orphan_themes":
         return func(vocab, assignments, db_path, **kwargs)
     elif func_name == "compare_tag_records":
         return func(vocab, assignments, db_path, **kwargs)

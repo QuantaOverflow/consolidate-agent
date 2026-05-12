@@ -32,7 +32,7 @@ class PlanOutput(BaseModel):
     raw_signals_observed: str = Field(description="1-2 sentences: what stands out in the diagnostics. Cite specific numbers.")
     suspected_biases: str = Field(description="What aspects of the raw signals might be misleading? E.g. 'missing_rate may be inflated by LLM conservatism' or 'high cooccur may not mean synonymy'.")
     probe_calls_needed: list[str] = Field(
-        description="1-3 probe calls in format: inspect_missing_records(n=10) | inspect_cooccur_pair(tag_a=X, tag_b=Y) | inspect_tag(name=X) | compare_tag_records(tag_a=X, tag_b=Y). Pick the most diagnostic probes.",
+        description="1-3 probe calls. Available: inspect_missing_records(n=10) | inspect_cooccur_pair(tag_a=X, tag_b=Y) | inspect_tag(name=X) | inspect_outliers(name=X, n=5) | find_orphan_themes(n=10) | compare_tag_records(tag_a=X, tag_b=Y). Pick the most diagnostic probes.",
         max_length=3,
     )
 
@@ -72,6 +72,8 @@ Available probes:
 - inspect_missing_records(n=10) — see actual missing records
 - inspect_cooccur_pair(tag_a=X, tag_b=Y) — see records co-occurring on a pair
 - inspect_tag(name=X) — see a tag's records + co-tags
+- inspect_outliers(name=X, n=5) — within tag X, list records with LOWEST cosine fit to the tag definition. Use this when you suspect expand_coverage attached records mechanically (surface keywords) that don't actually match. The "bottom_n_by_fit" entries are the audit candidates.
+- find_orphan_themes(n=10) — across a sample of records, list those whose MAX similarity to ANY vocab tag is lowest. Two failure modes appear here: (a) records with low max_sim AND missing=False → reverse_check likely forced a bad fit; (b) records with low max_sim AND missing=True → confirms vocab has a real gap; (c) records with high max_sim to a tag NOT in current_tags → potential missing co-tag or wrong assignment.
 - compare_tag_records(tag_a=X, tag_b=Y) — compare two tags' record sets
 
 Be conservative: if signals look weak/balanced, don't probe everything — just say "vocab looks healthy, minimal probes needed"."""
