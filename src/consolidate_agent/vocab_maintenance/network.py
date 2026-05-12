@@ -18,10 +18,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .apply import (
+    InvalidProposal,
     NewTagProposal,
+    OrphanError,
     apply_proposal as _apply_proposal,
     check_invariants,
 )
+from .observability import get_default_logger
 
 
 SCHEMA_VERSION = 1
@@ -426,6 +429,7 @@ class TagRecordNetwork:
         if not candidates:
             return [], 0
 
+        logger = get_default_logger()
         new_tag_names: list[str] = []
         for c in candidates:
             # Tolerate both dict and dataclass shapes
@@ -434,8 +438,12 @@ class TagRecordNetwork:
             try:
                 self.apply(NewTagProposal(name=name, definition=definition))
                 new_tag_names.append(name)
-            except Exception as e:  # noqa: BLE001 — skip duplicates etc, log + continue
-                print(f"  [ingest] skipping new tag '{name}': {e}", flush=True)
+            except (InvalidProposal, OrphanError) as e:
+                # Expected: duplicate name, self-merge, orphan-creating deprecate
+                print(f"  [ingest] skip new tag '{name}' (expected): {e}", flush=True)
+                logger.event("ingest.apply_skipped", tag=name,
+                             error_type=type(e).__name__, reason=str(e)[:200])
+            # Other exceptions (DB error, OSError, etc.) propagate — caller decides.
 
         if not new_tag_names:
             return [], 0
