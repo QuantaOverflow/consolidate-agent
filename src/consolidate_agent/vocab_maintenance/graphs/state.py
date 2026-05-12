@@ -37,3 +37,43 @@ class BootstrapState(TypedDict, total=False):
 
     # Control flow
     abort_reason: str
+
+
+class AgentLoopState(TypedDict, total=False):
+    """State for the maintenance agent loop.
+
+    Loop topology:
+      START → initial_measure → check_termination →─ diagnose → route_action
+                                       ↑                            │
+                                       │                            ↓
+                                       └─ {applied, rolled_back, blocked_empty, unknown, apply_error}
+                                                                    │
+                                                                    └─→ done → END
+    """
+    # Inputs
+    initial_vocab: list
+    max_iter: int
+    hit_rate_regression_threshold: float
+    disabled_actions: list
+
+    # Loop state
+    iter: int
+    vocab: list
+    assignments: list
+    diagnostics: dict
+    blocked_actions: list                 # serialized set
+    history: list                         # IterationRecord dicts
+
+    # Per-iter scratch
+    decision: dict
+    action: str
+    focus: str
+    proposals: list                       # serialized proposals
+    new_vocab: list
+    new_assignments: list
+    new_diag: dict
+    rec: dict                             # current iter record being assembled
+    iter_result: str                      # "applied" / "blocked" / etc, set per node
+
+    # Termination
+    final_status: str                     # FinalStatus.value

@@ -1,4 +1,8 @@
-"""Agent loop: signal-driven state machine for vocab maintenance.
+"""Maintenance agent: facade over the LangGraph StateGraph.
+
+Public types (AgentState, FinalStatus, IterationRecord, Agent) are
+backward-compatible with the pre-graph implementation. Internally
+Agent.run() builds and invokes a StateGraph from .graphs.agent.
 
 Per iteration:
   1. measure (reverse_check) → diagnostics, assignments
@@ -9,28 +13,19 @@ Per iteration:
   6. verify hit_rate (anti-regression) → keep or rollback
   7. record history, loop
 
-Stop conditions:
+Stop conditions (FinalStatus):
   - completed: diagnose returns done
   - max_iter_exhausted: iter >= max_iter
-  - no_actions_remaining: all 3 actions blocked
-  - fatal_error: unexpected exception
+  - no_actions_remaining: all 3 ACTIONS in blocked_actions
+  - fatal_error: unexpected exception during diagnose
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
-
-from .apply import (
-    DeprecateProposal,
-    InvalidProposal,
-    MergeProposal,
-    NewTagProposal,
-    OrphanError,
-    apply_proposal,
-    check_invariants,
-)
-from .observability import get_default_logger
+from pathlib import Path
+from typing import Callable
 
 
 ACTIONS = ("propose_new", "propose_merge", "propose_deprecate")
@@ -46,12 +41,12 @@ class FinalStatus(str, Enum):
 @dataclass
 class IterationRecord:
     iter: int
-    action: str                 # 'done' / 'propose_X' / 'blocked' / 'rolled_back'
+    action: str                 # 'done' / 'propose_X' / 'blocked' / 'unknown_action' / ''
     decision: dict | None       # diagnose output
     proposals: list = field(default_factory=list)
     hit_rate_before: float = 0.0
     hit_rate_after: float = 0.0
-    result: str = ""            # 'completed' / 'applied' / 'rolled_back' / 'blocked_empty' / 'apply_error'
+    result: str = ""            # 'completed' / 'applied' / 'rolled_back' / 'blocked_empty' / 'apply_error' / 'fatal_error' / 'blocked' / 'unknown_action'
     blocked_actions_after: list = field(default_factory=list)
     error: str | None = None
 
@@ -74,7 +69,25 @@ def _hit_rate(diagnostics: dict) -> float:
 
 
 class Agent:
-    """Signal-driven loop. Dependencies injected for testability."""
+    """Maintenance agent. Public contract identical to pre-graph version.
+
+    Internally compiles a LangGraph StateGraph (.graphs.agent.build_agent_graph)
+    and drives it via graph.invoke(). State transitions are equivalent to the
+    previous pure-Python while-loop.
+
+    measure_fn signature contract:
+        measure_fn(
+            vocab,
+            *,
+            action: str | None,                 # None on initial call; 'propose_*' post-apply
+            current_assignments: list[dict] | None,
+            previous_assignments: list[dict] | None,
+        ) -> tuple[diagnostics_dict, assignments_list]
+
+    diagnose_fn signature contract:
+        diagnose_fn(vocab, diagnostics, assignments, *, blocked_actions=[]) -> dict
+            Returns either {"decision": {...}} or the decision dict directly.
+    """
 
     def __init__(
         self,
@@ -84,25 +97,8 @@ class Agent:
         max_iter: int = 5,
         hit_rate_regression_threshold: float = 0.03,
         disabled_actions: set[str] | frozenset[str] | None = None,
+        checkpoint_db: Path | None = None,
     ):
-        """Agent loop.
-
-        measure_fn signature contract (consistent across all call sites):
-            measure_fn(
-                vocab: list[dict],
-                *,
-                action: str | None,                 # None on initial call; 'propose_*' post-apply
-                current_assignments: list[dict] | None,  # None on initial; apply.py output post-apply
-                previous_assignments: list[dict] | None, # None on initial; pre-apply state post-apply
-            ) -> tuple[diagnostics_dict, assignments_list]
-
-        diagnose_fn signature contract:
-            diagnose_fn(
-                vocab, diagnostics, assignments,
-                *,
-                blocked_actions: list[str],
-            ) -> dict (with "decision" key or decision itself)
-        """
         self.measure_fn = measure_fn
         self.diagnose_fn = diagnose_fn
         self.propose_fns = propose_fns
@@ -111,181 +107,73 @@ class Agent:
         # Permanently-blocked actions (e.g., maintenance disables propose_new
         # because the growth path lives in ingest_batch, not in the agent loop).
         self.disabled_actions: set[str] = set(disabled_actions or ())
+        # Optional persistent checkpoint backend; None → MemorySaver.
+        self.checkpoint_db: Path | None = checkpoint_db
 
-    def run(self, initial_vocab: list[dict]) -> tuple[AgentState, FinalStatus]:
-        logger = get_default_logger()
+    def run(
+        self,
+        initial_vocab: list[dict],
+        *,
+        thread_id: str | None = None,
+    ) -> tuple[AgentState, FinalStatus]:
+        from .graphs.agent import build_agent_graph
 
-        # Initial measure — pass full ctx (None values) so measure_fn always
-        # sees a consistent signature.
-        diag, assignments = self.measure_fn(
-            initial_vocab,
-            action=None,
-            current_assignments=None,
-            previous_assignments=None,
-        )
+        if thread_id is None:
+            thread_id = f"agent-{int(time.time())}"
+        config = {"configurable": {"thread_id": thread_id}}
+        initial_state = {
+            "initial_vocab": list(initial_vocab),
+            "max_iter": self.max_iter,
+            "hit_rate_regression_threshold": self.hit_rate_regression_threshold,
+            "disabled_actions": list(self.disabled_actions),
+        }
+
+        # Recursion limit: each iter walks 4-6 nodes; allow 6 × max_iter + buffer.
+        invoke_config = {**config, "recursion_limit": max(50, 6 * self.max_iter + 20)}
+
+        if self.checkpoint_db is None:
+            from langgraph.checkpoint.memory import MemorySaver
+            cp = MemorySaver()
+            graph = build_agent_graph(
+                cp,
+                measure_fn=self.measure_fn,
+                diagnose_fn=self.diagnose_fn,
+                propose_fns=self.propose_fns,
+            )
+            result = graph.invoke(initial_state, invoke_config)
+        else:
+            from .graphs.checkpointer import sqlite_checkpointer
+            with sqlite_checkpointer(self.checkpoint_db) as cp:
+                graph = build_agent_graph(
+                    cp,
+                    measure_fn=self.measure_fn,
+                    diagnose_fn=self.diagnose_fn,
+                    propose_fns=self.propose_fns,
+                )
+                result = graph.invoke(initial_state, invoke_config)
+
+        # Convert dict state → dataclass for backward compat.
+        history = [
+            IterationRecord(
+                iter=rec["iter"],
+                action=rec.get("action", ""),
+                decision=rec.get("decision"),
+                proposals=rec.get("proposals", []),
+                hit_rate_before=rec.get("hit_rate_before", 0.0),
+                hit_rate_after=rec.get("hit_rate_after", 0.0),
+                result=rec.get("result", ""),
+                blocked_actions_after=rec.get("blocked_actions_after", []),
+                error=rec.get("error"),
+            )
+            for rec in result.get("history", [])
+        ]
         state = AgentState(
-            vocab=list(initial_vocab),
-            assignments=list(assignments),
-            diagnostics=diag,
-            blocked_actions=set(self.disabled_actions),
+            vocab=result["vocab"],
+            assignments=result["assignments"],
+            diagnostics=result["diagnostics"],
+            iter=result.get("iter", 0),
+            blocked_actions=set(result.get("blocked_actions", [])),
+            history=history,
         )
-        check_invariants(state.vocab, state.assignments)
-        logger.event(
-            "agent.run.start",
-            vocab_size=len(state.vocab),
-            assignments=len(state.assignments),
-            hit_rate=round(_hit_rate(diag), 4),
-            disabled_actions=sorted(self.disabled_actions),
-            max_iter=self.max_iter,
-        )
-
-        while True:
-            # Stop check: budget
-            if state.iter >= self.max_iter:
-                logger.event("agent.run.done", status="max_iter_exhausted",
-                             iters=state.iter, vocab_size=len(state.vocab))
-                return state, FinalStatus.MAX_ITER_EXHAUSTED
-
-            # Stop check: all actions blocked
-            if state.blocked_actions.issuperset(ACTIONS):
-                logger.event("agent.run.done", status="no_actions_remaining",
-                             iters=state.iter, vocab_size=len(state.vocab))
-                return state, FinalStatus.NO_ACTIONS_REMAINING
-
-            state.iter += 1
-            rec = IterationRecord(iter=state.iter, action="", decision=None,
-                                  hit_rate_before=_hit_rate(state.diagnostics))
-            logger.event("agent.iter.start", iter=state.iter,
-                         hit_rate=round(rec.hit_rate_before, 4),
-                         blocked=sorted(state.blocked_actions))
-
-            try:
-                # Diagnose — pass blocked_actions so LLM avoids repeating choices
-                diag_result = self.diagnose_fn(
-                    state.vocab,
-                    state.diagnostics,
-                    state.assignments,
-                    blocked_actions=sorted(state.blocked_actions),
-                )
-                decision = diag_result.get("decision") if isinstance(diag_result, dict) and "decision" in diag_result else diag_result
-                rec.decision = decision
-
-                action = decision["next_action"]
-                focus = decision.get("action_focus", "")
-                logger.event("agent.iter.diagnose.done", iter=state.iter,
-                             action=action, focus=focus[:120],
-                             confidence=decision.get("confidence"))
-
-                # Done
-                if action == "done":
-                    rec.action = "done"
-                    rec.result = "completed"
-                    rec.hit_rate_after = rec.hit_rate_before
-                    rec.blocked_actions_after = sorted(state.blocked_actions)
-                    state.history.append(rec)
-                    logger.event("agent.iter.done", iter=state.iter, action="done", result="completed")
-                    logger.event("agent.run.done", status="completed",
-                                 iters=state.iter, vocab_size=len(state.vocab))
-                    return state, FinalStatus.COMPLETED
-
-                # Skip blocked
-                if action in state.blocked_actions:
-                    rec.action = action
-                    rec.result = "blocked"
-                    rec.hit_rate_after = rec.hit_rate_before
-                    rec.blocked_actions_after = sorted(state.blocked_actions)
-                    state.history.append(rec)
-                    continue
-
-                # Propose
-                if action not in self.propose_fns:
-                    rec.action = action
-                    rec.result = "unknown_action"
-                    rec.error = f"unknown action: {action}"
-                    rec.blocked_actions_after = sorted(state.blocked_actions)
-                    state.history.append(rec)
-                    state.blocked_actions.add(action)
-                    continue
-
-                proposals = self.propose_fns[action](state.vocab, state.assignments, focus)
-                rec.action = action
-                rec.proposals = list(proposals)
-
-                if not proposals:
-                    state.blocked_actions.add(action)
-                    rec.result = "blocked_empty"
-                    rec.hit_rate_after = rec.hit_rate_before
-                    rec.blocked_actions_after = sorted(state.blocked_actions)
-                    state.history.append(rec)
-                    logger.event("agent.iter.done", iter=state.iter, action=action, result="blocked_empty")
-                    continue
-
-                # Apply
-                new_vocab, new_assignments = state.vocab, state.assignments
-                try:
-                    for p in proposals:
-                        new_vocab, new_assignments = apply_proposal(new_vocab, new_assignments, p)
-                except (InvalidProposal, OrphanError) as e:
-                    state.blocked_actions.add(action)
-                    rec.result = "apply_error"
-                    rec.error = f"{type(e).__name__}: {e}"
-                    rec.hit_rate_after = rec.hit_rate_before
-                    rec.blocked_actions_after = sorted(state.blocked_actions)
-                    state.history.append(rec)
-                    logger.event("agent.iter.done", iter=state.iter, action=action,
-                                 result="apply_error", error=rec.error)
-                    continue
-
-                check_invariants(new_vocab, new_assignments)
-
-                # Post-apply diagnostics. measure_fn gets enough context to do
-                # incremental work: zero LLM for merge/deprecate (apply.py is
-                # deterministic), small-batch LLM for propose_new (re-check
-                # previously-missing records against the new tag).
-                new_diag, new_assignments2 = self.measure_fn(
-                    new_vocab,
-                    action=action,
-                    current_assignments=new_assignments,
-                    previous_assignments=state.assignments,
-                )
-                new_hit = _hit_rate(new_diag)
-                rec.hit_rate_after = new_hit
-
-                if new_hit < rec.hit_rate_before - self.hit_rate_regression_threshold:
-                    # rollback
-                    state.blocked_actions.add(action)
-                    rec.result = "rolled_back"
-                    rec.blocked_actions_after = sorted(state.blocked_actions)
-                    state.history.append(rec)
-                    logger.event("agent.iter.done", iter=state.iter, action=action,
-                                 result="rolled_back",
-                                 hit_rate_before=round(rec.hit_rate_before, 4),
-                                 hit_rate_after=round(rec.hit_rate_after, 4))
-                    continue
-
-                # Commit
-                state.vocab = new_vocab
-                state.diagnostics = new_diag
-                state.assignments = new_assignments2
-                rec.result = "applied"
-                rec.blocked_actions_after = sorted(state.blocked_actions)
-                state.history.append(rec)
-                logger.event("agent.iter.done", iter=state.iter, action=action,
-                             result="applied",
-                             proposals=len(rec.proposals),
-                             vocab_size_after=len(state.vocab),
-                             hit_rate_before=round(rec.hit_rate_before, 4),
-                             hit_rate_after=round(rec.hit_rate_after, 4))
-
-            except Exception as e:  # noqa: BLE001 — fatal path
-                rec.result = "fatal_error"
-                rec.error = f"{type(e).__name__}: {e}"
-                rec.blocked_actions_after = sorted(state.blocked_actions)
-                state.history.append(rec)
-                import traceback as _tb
-                logger.event("agent.iter.done", iter=state.iter, action=rec.action,
-                             result="fatal_error", error=rec.error,
-                             traceback=_tb.format_exc()[:1000])
-                logger.event("agent.run.done", status="fatal_error",
-                             iters=state.iter, vocab_size=len(state.vocab))
-                return state, FinalStatus.FATAL_ERROR
+        status = FinalStatus(result.get("final_status", "fatal_error"))
+        return state, status
