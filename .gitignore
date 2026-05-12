@@ -25,5 +25,11 @@ build/
 outputs/
 outputs-*/
 
+# Derived eval fixtures — regenerable via tests/fixtures/build_scenarios.py
+# Keep expected.json (hand-curated ground truth) tracked.
+tests/fixtures/scenario_*/vocab.json
+tests/fixtures/scenario_*/diagnostics.json
+tests/fixtures/scenario_*/assignments.json
+
 # OS/editor noise
 .DS_Store
