@@ -265,6 +265,299 @@ def test_n14_apply_updates_metadata():
     assert net.metadata["vocab_hash"] == _vocab_hash(net.vocab)
 
 
+# ── Ingest helpers ──────────────────────────────────────────────────────────
+
+
+def mk_raw_records(spec: list[tuple[str, str, str]]) -> list[dict]:
+    """spec: [(record_id, title, insight), ...]"""
+    return [{"record_id": rid, "title": t, "insight": i} for rid, t, i in spec]
+
+
+def make_reverse_check_fn(assignment_for: dict[str, dict]):
+    """Returns fake reverse_check that yields pre-built assignments by record_id.
+
+    Tracks call_count for assertions.
+    """
+    call_count = [0]
+    seen_record_ids = []
+
+    def fn(records, vocab, concurrency):
+        call_count[0] += 1
+        results = []
+        for r in records:
+            seen_record_ids.append(r["record_id"])
+            base = assignment_for.get(r["record_id"], {
+                "record_id": r["record_id"],
+                "title": r["title"],
+                "selected_tags": [],
+                "missing": True,
+                "missing_concept": "default missing",
+                "reason": "",
+            })
+            results.append(dict(base))
+        return results
+
+    fn.call_count = call_count
+    fn.seen_record_ids = seen_record_ids
+    return fn
+
+
+def make_propose_new_fn(candidates: list[dict]):
+    """Returns fake propose_new that yields canned candidates."""
+    call_count = [0]
+    seen_pool_sizes = []
+
+    def fn(vocab, assignments, focus):
+        call_count[0] += 1
+        seen_pool_sizes.append(sum(1 for a in assignments if a.get("missing")))
+        return list(candidates)
+
+    fn.call_count = call_count
+    fn.seen_pool_sizes = seen_pool_sizes
+    return fn
+
+
+def make_records_fetcher(records_by_id: dict[str, dict]):
+    def fn(record_ids):
+        return [records_by_id[rid] for rid in record_ids if rid in records_by_id]
+    return fn
+
+
+# ── Ingest tests ────────────────────────────────────────────────────────────
+
+
+@test
+def test_i1_empty_batch_zero_llm():
+    vocab = mk_vocab([("a", "def a")])
+    assignments = mk_assignments({"r1": ["a"]})
+    net = TagRecordNetwork(vocab=vocab, assignments=assignments)
+
+    rc = make_reverse_check_fn({})
+    pn = make_propose_new_fn([])
+    result = net.ingest_batch([], reverse_check_fn=rc, propose_new_fn=pn)
+
+    assert result.ingested == 0
+    assert result.skipped_duplicates == 0
+    assert rc.call_count[0] == 0
+    assert pn.call_count[0] == 0
+
+
+@test
+def test_i2_all_assigned_no_trigger():
+    vocab = mk_vocab([("a", "def a"), ("b", "def b")])
+    net = TagRecordNetwork(vocab=vocab, assignments=[])
+
+    fresh = mk_raw_records([("r1", "t1", "i1"), ("r2", "t2", "i2"), ("r3", "t3", "i3")])
+    rc = make_reverse_check_fn({
+        "r1": {"record_id": "r1", "title": "t1", "selected_tags": [{"name": "a", "confidence": "high"}], "missing": False, "missing_concept": "", "reason": ""},
+        "r2": {"record_id": "r2", "title": "t2", "selected_tags": [{"name": "b", "confidence": "high"}], "missing": False, "missing_concept": "", "reason": ""},
+        "r3": {"record_id": "r3", "title": "t3", "selected_tags": [{"name": "a", "confidence": "high"}], "missing": False, "missing_concept": "", "reason": ""},
+    })
+    pn = make_propose_new_fn([])
+    result = net.ingest_batch(fresh, reverse_check_fn=rc, propose_new_fn=pn, propose_threshold=10)
+
+    assert result.ingested == 3
+    assert result.newly_assigned == 3
+    assert result.newly_missing == 0
+    assert result.new_tags_added == []
+    assert pn.call_count[0] == 0, "propose_new shouldn't fire with empty pool"
+
+
+@test
+def test_i3_threshold_triggers_propose_new():
+    vocab = mk_vocab([("a", "def a")])
+    net = TagRecordNetwork(vocab=vocab, assignments=[])
+
+    # 5 fresh records, all missing
+    fresh = mk_raw_records([(f"r{i}", f"t{i}", f"i{i}") for i in range(1, 6)])
+    # rc returns all missing on first call (initial classification);
+    # on re-check call (after propose), 4 of them get the new tag.
+    rc_call = [0]
+
+    def rc(records, vocab, concurrency):
+        rc_call[0] += 1
+        if rc_call[0] == 1:
+            # initial classification — all missing
+            return [{
+                "record_id": r["record_id"], "title": r["title"],
+                "selected_tags": [], "missing": True, "missing_concept": "x", "reason": "",
+            } for r in records]
+        # re-check after new tag — 4 absorbed, 1 still missing
+        out = []
+        for i, r in enumerate(records):
+            if i < 4:
+                out.append({
+                    "record_id": r["record_id"], "title": r["title"],
+                    "selected_tags": [{"name": "newtag", "confidence": "high"}],
+                    "missing": False, "missing_concept": "", "reason": "",
+                })
+            else:
+                out.append({
+                    "record_id": r["record_id"], "title": r["title"],
+                    "selected_tags": [], "missing": True, "missing_concept": "x", "reason": "",
+                })
+        return out
+
+    pn = make_propose_new_fn([{"name": "newtag", "definition": "def newtag"}])
+    fetcher = make_records_fetcher({r["record_id"]: r for r in fresh})
+
+    result = net.ingest_batch(
+        fresh,
+        reverse_check_fn=rc,
+        propose_new_fn=pn,
+        records_fetcher=fetcher,
+        propose_threshold=5,  # trigger right at pool=5
+    )
+
+    assert result.ingested == 5
+    assert result.newly_missing == 5  # all initially missing
+    assert pn.call_count[0] == 1, "propose_new should fire"
+    assert result.new_tags_added == ["newtag"]
+    assert "newtag" in [t["name"] for t in net.vocab]
+    assert result.absorbed_from_pool == 4
+    assert result.total_pending_after == 1
+
+
+@test
+def test_i4_dedup_skips_existing():
+    vocab = mk_vocab([("a", "def a")])
+    # r1 already in network
+    existing = mk_assignments({"r1": ["a"]})
+    net = TagRecordNetwork(vocab=vocab, assignments=existing)
+
+    fresh = mk_raw_records([("r1", "t1", "i1"), ("r2", "t2", "i2")])
+    rc = make_reverse_check_fn({
+        "r2": {"record_id": "r2", "title": "t2", "selected_tags": [{"name": "a", "confidence": "high"}], "missing": False, "missing_concept": "", "reason": ""},
+    })
+    pn = make_propose_new_fn([])
+    result = net.ingest_batch(fresh, reverse_check_fn=rc, propose_new_fn=pn, propose_threshold=10)
+
+    assert result.ingested == 1
+    assert result.skipped_duplicates == 1
+    assert rc.seen_record_ids == ["r2"], "rc only called on fresh r2"
+
+
+@test
+def test_i5_empty_vocab_raises():
+    net = TagRecordNetwork(vocab=[], assignments=[])
+    fresh = mk_raw_records([("r1", "t1", "i1")])
+    try:
+        net.ingest_batch(fresh, reverse_check_fn=make_reverse_check_fn({}))
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "vocab is empty" in str(e)
+
+
+@test
+def test_i6_propose_new_returns_empty_no_crash():
+    vocab = mk_vocab([("a", "def a")])
+    net = TagRecordNetwork(vocab=vocab, assignments=[])
+
+    fresh = mk_raw_records([("r1", "t1", "i1"), ("r2", "t2", "i2")])
+    rc = make_reverse_check_fn({})  # both missing by default
+    pn = make_propose_new_fn([])  # returns nothing
+    result = net.ingest_batch(fresh, reverse_check_fn=rc, propose_new_fn=pn, propose_threshold=2)
+
+    assert pn.call_count[0] == 1, "propose_new called"
+    assert result.new_tags_added == []
+    assert result.absorbed_from_pool == 0
+    assert result.total_pending_after == 2  # all still pending
+
+
+@test
+def test_i7_idempotent_double_ingest():
+    vocab = mk_vocab([("a", "def a")])
+    net = TagRecordNetwork(vocab=vocab, assignments=[])
+
+    fresh = mk_raw_records([("r1", "t1", "i1"), ("r2", "t2", "i2")])
+    rc1 = make_reverse_check_fn({
+        "r1": {"record_id": "r1", "title": "t1", "selected_tags": [{"name": "a", "confidence": "high"}], "missing": False, "missing_concept": "", "reason": ""},
+        "r2": {"record_id": "r2", "title": "t2", "selected_tags": [{"name": "a", "confidence": "high"}], "missing": False, "missing_concept": "", "reason": ""},
+    })
+    pn = make_propose_new_fn([])
+
+    r1 = net.ingest_batch(fresh, reverse_check_fn=rc1, propose_new_fn=pn, propose_threshold=10)
+    assert r1.ingested == 2
+
+    # Second ingest with same records — should all be dedup'd
+    rc2 = make_reverse_check_fn({})
+    r2 = net.ingest_batch(fresh, reverse_check_fn=rc2, propose_new_fn=pn, propose_threshold=10)
+    assert r2.ingested == 0
+    assert r2.skipped_duplicates == 2
+    assert rc2.call_count[0] == 0, "no LLM on second ingest"
+
+
+@test
+def test_i8_validate_after_ingest():
+    vocab = mk_vocab([("a", "def a")])
+    net = TagRecordNetwork(vocab=vocab, assignments=[])
+
+    fresh = mk_raw_records([("r1", "t1", "i1")])
+    rc = make_reverse_check_fn({
+        "r1": {"record_id": "r1", "title": "t1", "selected_tags": [{"name": "a", "confidence": "high"}], "missing": False, "missing_concept": "", "reason": ""},
+    })
+    net.ingest_batch(fresh, reverse_check_fn=rc, propose_new_fn=make_propose_new_fn([]), propose_threshold=10)
+    net.validate()  # must not raise
+
+
+@test
+def test_i9_save_load_after_ingest():
+    vocab = mk_vocab([("a", "def a")])
+    net = TagRecordNetwork(vocab=vocab, assignments=[])
+
+    fresh = mk_raw_records([("r1", "t1", "i1")])
+    rc = make_reverse_check_fn({
+        "r1": {"record_id": "r1", "title": "t1", "selected_tags": [], "missing": True, "missing_concept": "x", "reason": ""},
+    })
+    net.ingest_batch(fresh, reverse_check_fn=rc, propose_new_fn=make_propose_new_fn([]), propose_threshold=100)
+
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "n.json"
+        net.save(path)
+        net2 = TagRecordNetwork.load(path)
+
+    assert net2.vocab == net.vocab
+    assert net2.assignments == net.assignments
+    # Pending pool persists
+    assert sum(1 for a in net2.assignments if a.get("missing")) == 1
+
+
+@test
+def test_i10_flush_pending_triggers_on_existing_pool():
+    """flush_pending forces propose_new on already-accumulated pool without new records."""
+    vocab = mk_vocab([("a", "def a")])
+    # Pre-load pool with 5 missing records
+    assignments = mk_assignments({f"r{i}": [] for i in range(1, 6)})
+    net = TagRecordNetwork(vocab=vocab, assignments=assignments)
+
+    raw_records = {f"r{i}": {"record_id": f"r{i}", "title": f"t{i}", "insight": f"i{i}"} for i in range(1, 6)}
+
+    rc_call = [0]
+    def rc(records, vocab, concurrency):
+        rc_call[0] += 1
+        # re-check absorbs all 5 with new tag
+        return [{
+            "record_id": r["record_id"], "title": r["title"],
+            "selected_tags": [{"name": "newtag", "confidence": "high"}],
+            "missing": False, "missing_concept": "", "reason": "",
+        } for r in records]
+
+    pn = make_propose_new_fn([{"name": "newtag", "definition": "def newtag"}])
+    fetcher = make_records_fetcher(raw_records)
+
+    result = net.flush_pending(
+        reverse_check_fn=rc,
+        propose_new_fn=pn,
+        records_fetcher=fetcher,
+        propose_threshold=5,
+    )
+
+    assert result.ingested == 0, "flush doesn't ingest new records"
+    assert result.new_tags_added == ["newtag"]
+    assert result.absorbed_from_pool == 5
+    assert result.total_pending_after == 0
+
+
 # ── Runner ───────────────────────────────────────────────────────────────────
 
 

@@ -4,8 +4,8 @@ Single atomic unit for the tag-record bipartite graph. Avoids the
 vocab/assignments drift problem by treating them as one snapshot —
 load, mutate via apply, save, always together.
 
-Streaming ingest (handling new batches of records) is a follow-up
-abstraction layered on top of this — not included here.
+Also: `ingest_batch` for streaming new record batches (growth path),
+`flush_pending` for explicit pool re-check (migration / cleanup).
 """
 from __future__ import annotations
 
@@ -15,9 +15,10 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .apply import (
+    NewTagProposal,
     apply_proposal as _apply_proposal,
     check_invariants,
 )
@@ -239,3 +240,237 @@ class TagRecordNetwork:
         self.assignments = new_assignments
         self.metadata["last_modified"] = time.time()
         self.metadata["vocab_hash"] = _vocab_hash(self.vocab)
+
+    # ── Streaming ingest ─────────────────────────────────────────────────
+
+    def ingest_batch(
+        self,
+        new_records: list[dict],
+        *,
+        db_path: Path | None = None,
+        propose_threshold: int = 30,
+        concurrency: int = 10,
+        reverse_check_fn: Callable | None = None,
+        propose_new_fn: Callable | None = None,
+        records_fetcher: Callable[[list[str]], list[dict]] | None = None,
+    ) -> "IngestResult":
+        """Process a batch of new records.
+
+        Flow:
+          1. Dedup: skip records whose record_id is already in assignments.
+          2. Classify: LLM reverse_check fresh records against current vocab.
+          3. Maybe-trigger: if pending pool size ≥ propose_threshold,
+             run propose_new + apply new tags + re-check the whole pool.
+
+        Args:
+            new_records: list of raw records (need record_id, title, insight).
+            db_path: used by default propose_new_fn / records_fetcher.
+            propose_threshold: pool size that triggers propose_new (default 30).
+            concurrency: LLM ThreadPoolExecutor workers.
+            reverse_check_fn / propose_new_fn / records_fetcher: test hooks;
+                production uses defaults.
+
+        Returns: IngestResult with all the counts.
+
+        Raises:
+            ValueError if vocab is empty (call bootstrap() first).
+        """
+        if not self.vocab:
+            raise ValueError("vocab is empty; run bootstrap() or load() first before ingest_batch")
+
+        # Step 1: dedup
+        existing_ids = {a["record_id"] for a in self.assignments}
+        fresh = [r for r in new_records if r["record_id"] not in existing_ids]
+        skipped = len(new_records) - len(fresh)
+
+        # Early return: nothing fresh to process AND no implicit re-check semantics
+        # (use flush_pending() if you want to re-evaluate the pool without new records)
+        if not fresh:
+            return IngestResult(
+                ingested=0,
+                skipped_duplicates=skipped,
+                newly_assigned=0,
+                newly_missing=0,
+                new_tags_added=[],
+                absorbed_from_pool=0,
+                total_pending_after=sum(1 for a in self.assignments if a.get("missing")),
+            )
+
+        # Step 2: classify fresh records via LLM
+        _reverse_check = reverse_check_fn or _default_reverse_check
+        new_assignments = _reverse_check(fresh, self.vocab, concurrency)
+        _filter_dangling_refs(new_assignments, self.vocab)
+
+        self.assignments.extend(new_assignments)
+        newly_assigned = sum(1 for a in new_assignments if not a.get("missing"))
+        newly_missing = sum(1 for a in new_assignments if a.get("missing"))
+
+        # Step 3 & 4: maybe trigger propose_new + re-check pool
+        new_tags_added, absorbed = self._maybe_propose_and_recheck(
+            propose_threshold=propose_threshold,
+            concurrency=concurrency,
+            db_path=db_path,
+            propose_new_fn=propose_new_fn,
+            records_fetcher=records_fetcher,
+            reverse_check_fn=reverse_check_fn,
+        )
+
+        self.metadata["last_modified"] = time.time()
+        self.metadata["vocab_hash"] = _vocab_hash(self.vocab)
+
+        return IngestResult(
+            ingested=len(fresh),
+            skipped_duplicates=skipped,
+            newly_assigned=newly_assigned,
+            newly_missing=newly_missing,
+            new_tags_added=new_tags_added,
+            absorbed_from_pool=absorbed,
+            total_pending_after=sum(1 for a in self.assignments if a.get("missing")),
+        )
+
+    def flush_pending(
+        self,
+        *,
+        db_path: Path | None = None,
+        propose_threshold: int = 30,
+        concurrency: int = 10,
+        reverse_check_fn: Callable | None = None,
+        propose_new_fn: Callable | None = None,
+        records_fetcher: Callable[[list[str]], list[dict]] | None = None,
+    ) -> "IngestResult":
+        """Force a propose_new check on the accumulated pending pool.
+
+        Useful right after `from_legacy_files()` or when pool has grown to
+        threshold but no fresh batch has come in to trigger ingest_batch.
+
+        Same logic as ingest_batch's Step 3-4, no fresh records.
+        """
+        if not self.vocab:
+            raise ValueError("vocab is empty; run bootstrap() or load() first before flush_pending")
+
+        new_tags_added, absorbed = self._maybe_propose_and_recheck(
+            propose_threshold=propose_threshold,
+            concurrency=concurrency,
+            db_path=db_path,
+            propose_new_fn=propose_new_fn,
+            records_fetcher=records_fetcher,
+            reverse_check_fn=reverse_check_fn,
+        )
+
+        self.metadata["last_modified"] = time.time()
+        self.metadata["vocab_hash"] = _vocab_hash(self.vocab)
+
+        return IngestResult(
+            ingested=0,
+            skipped_duplicates=0,
+            newly_assigned=0,
+            newly_missing=0,
+            new_tags_added=new_tags_added,
+            absorbed_from_pool=absorbed,
+            total_pending_after=sum(1 for a in self.assignments if a.get("missing")),
+        )
+
+    def _maybe_propose_and_recheck(
+        self,
+        *,
+        propose_threshold: int,
+        concurrency: int,
+        db_path: Path | None,
+        propose_new_fn: Callable | None,
+        records_fetcher: Callable | None,
+        reverse_check_fn: Callable | None,
+    ) -> tuple[list[str], int]:
+        """If pending pool ≥ threshold, propose new tags, apply, re-check whole pool.
+
+        Returns (new_tag_names, absorbed_from_pool).
+        """
+        pending = [a for a in self.assignments if a.get("missing")]
+        if len(pending) < propose_threshold:
+            return [], 0
+
+        _propose_new = propose_new_fn or _default_propose_new(db_path)
+        candidates = _propose_new(self.vocab, self.assignments, "")  # focus="" — full pool
+        if not candidates:
+            return [], 0
+
+        new_tag_names: list[str] = []
+        for c in candidates:
+            # Tolerate both dict and dataclass shapes
+            name = c["name"] if isinstance(c, dict) else c.name
+            definition = c["definition"] if isinstance(c, dict) else c.definition
+            try:
+                self.apply(NewTagProposal(name=name, definition=definition))
+                new_tag_names.append(name)
+            except Exception as e:  # noqa: BLE001 — skip duplicates etc, log + continue
+                print(f"  [ingest] skipping new tag '{name}': {e}", flush=True)
+
+        if not new_tag_names:
+            return [], 0
+
+        # Re-check the whole pending pool against the expanded vocab
+        pending_ids = [a["record_id"] for a in pending]
+        _fetch = records_fetcher or _default_records_fetcher(db_path)
+        pending_raw = _fetch(pending_ids)
+        _reverse_check = reverse_check_fn or _default_reverse_check
+        re_checked = _reverse_check(pending_raw, self.vocab, concurrency)
+        _filter_dangling_refs(re_checked, self.vocab)
+
+        # Replace pool entries in assignments with re-checked results
+        re_by_id = {a["record_id"]: a for a in re_checked}
+        self.assignments = [
+            re_by_id[a["record_id"]] if a["record_id"] in re_by_id else a
+            for a in self.assignments
+        ]
+
+        absorbed = sum(1 for a in re_checked if not a.get("missing"))
+        return new_tag_names, absorbed
+
+
+# ── IngestResult ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class IngestResult:
+    """Outcome of an ingest_batch / flush_pending call.
+
+    Invariant: ingested == newly_assigned + newly_missing
+    """
+    ingested: int                  # fresh records actually processed (post-dedup)
+    skipped_duplicates: int        # records skipped — record_id already present
+    newly_assigned: int            # fresh records that got tags from existing vocab
+    newly_missing: int             # fresh records that went into pending pool
+    new_tags_added: list[str]      # tags added by this call (via propose_new)
+    absorbed_from_pool: int        # pool records that became assigned after new tags
+    total_pending_after: int       # current pool size after this call
+
+
+# ── Default LLM-backed adapters (test hooks override) ────────────────────────
+
+
+def _default_reverse_check(records: list[dict], vocab: list[dict], concurrency: int) -> list[dict]:
+    from .measure import reverse_check_subset
+    return reverse_check_subset(records, vocab, batch_size=10, concurrency=concurrency)
+
+
+def _default_propose_new(db_path: Path | None) -> Callable:
+    """Build a propose_new adapter closed over db_path."""
+    from .propose.new import propose_new_fn as _propose_new
+
+    def adapter(vocab, assignments, focus):
+        return _propose_new(vocab, assignments, focus, db_path=db_path)
+
+    return adapter
+
+
+def _default_records_fetcher(db_path: Path | None) -> Callable[[list[str]], list[dict]]:
+    """Build a record fetcher that loads raw records from db by record_id."""
+    if db_path is None:
+        raise ValueError("db_path required when records_fetcher not provided")
+
+    def fetch(record_ids: list[str]) -> list[dict]:
+        from .measure import load_records
+        all_records = load_records(db_path)
+        by_id = {r["record_id"]: r for r in all_records}
+        return [by_id[rid] for rid in record_ids if rid in by_id]
+
+    return fetch
