@@ -486,6 +486,79 @@ def test_u12_disabled_actions_persist_across_iters():
     assert "propose_new" in diagnose._captured_blocked[-1]
 
 
+# U13: partial apply — successes committed, action NOT blocked
+@test
+def test_u13_partial_apply_commits_successes():
+    """Mix of valid + invalid proposals: valid ones apply, invalid skip, action not blocked.
+
+    Bug fix: previously the whole batch rolled back on any failure.
+    Now per-proposal try/except commits whatever's safe.
+    """
+    vocab = mk_vocab(["a", "b", "c"])  # a, b used; c unused
+    assignments = mk_assignments({
+        "r1": ["a", "b"],   # 2 tags → deprecating a is safe
+        "r2": ["b"],         # 1 tag → deprecating b would orphan r2
+    })
+    diag = mk_diagnostics(assignments, vocab)
+
+    # Both proposals in one batch: c (0 usage, safe) + b (would orphan r2)
+    propose_deprecate = make_propose_constant([
+        DeprecateProposal(tag="c"),   # SAFE: 0 usage, won't orphan anything
+        DeprecateProposal(tag="b"),   # UNSAFE: r2 only has b → OrphanError
+    ])
+    agent = Agent(
+        measure_fn=make_constant_measure(diag, assignments),
+        diagnose_fn=make_diagnose_seq([
+            {"next_action": "propose_deprecate", "action_focus": "", "confidence": "high"},
+            {"next_action": "done", "action_focus": "", "confidence": "high"},
+        ]),
+        propose_fns={"propose_deprecate": propose_deprecate},
+    )
+    state, status = agent.run(vocab)
+
+    # c should be deprecated (safe), b kept (orphan-blocked)
+    final_tag_names = {t["name"] for t in state.vocab}
+    assert "c" not in final_tag_names, f"c should have been deprecated, got vocab={final_tag_names}"
+    assert "b" in final_tag_names, f"b should remain (orphan would have killed it), got vocab={final_tag_names}"
+
+    # iter 1 should be 'applied' (not apply_error), action not blocked
+    assert state.history[0].result == "applied", f"got {state.history[0].result}"
+    assert "propose_deprecate" not in state.blocked_actions, \
+        f"action should NOT be blocked since at least 1 proposal succeeded; blocked={state.blocked_actions}"
+
+    # iter 2 → done (since diagnose returns done)
+    assert status == FinalStatus.COMPLETED
+
+
+# U14: all-fail case still blocks (regression check for old behavior path)
+@test
+def test_u14_all_proposals_fail_blocks_action():
+    """When ALL proposals fail, action is blocked (preserves old semantics)."""
+    vocab = mk_vocab(["a", "b"])
+    assignments = mk_assignments({"r1": ["a"], "r2": ["b"]})  # each record has 1 tag
+    diag = mk_diagnostics(assignments, vocab)
+
+    # Both proposals would orphan a record
+    propose_deprecate = make_propose_constant([
+        DeprecateProposal(tag="a"),   # orphans r1
+        DeprecateProposal(tag="b"),   # orphans r2
+    ])
+    agent = Agent(
+        measure_fn=make_constant_measure(diag, assignments),
+        diagnose_fn=make_diagnose_seq([
+            {"next_action": "propose_deprecate", "action_focus": "", "confidence": "high"},
+            {"next_action": "done", "action_focus": "", "confidence": "high"},
+        ]),
+        propose_fns={"propose_deprecate": propose_deprecate},
+    )
+    state, status = agent.run(vocab)
+
+    # Both failed → result=apply_error, action blocked
+    assert state.history[0].result == "apply_error"
+    assert "propose_deprecate" in state.blocked_actions
+    assert state.vocab == vocab  # nothing changed
+
+
 def main():
     passed = 0
     failed = 0

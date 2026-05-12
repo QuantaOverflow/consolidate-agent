@@ -145,6 +145,18 @@ def judge_tag(
     return result
 
 
+def _extract_focus_tags(focus: str, vocab: list[dict]) -> list[str]:
+    """Find vocab tag names mentioned in the focus string.
+
+    Agent's diagnose typically writes focus like "target tag X (0 usage)".
+    Scan focus for any tag name substring match (case-insensitive).
+    """
+    if not focus:
+        return []
+    focus_lower = focus.lower()
+    return [t["name"] for t in vocab if t["name"].lower() in focus_lower]
+
+
 def propose_deprecate_fn(
     vocab: list[dict],
     assignments: list[dict],
@@ -157,6 +169,10 @@ def propose_deprecate_fn(
     """In-memory propose_deprecate for agent loop.
 
     Returns list of DeprecateProposal (or MergeProposal if LLM says merge_to).
+
+    If `focus` names specific vocab tags, evaluation is restricted to those
+    tags only — agent-directed targeting beats LLM's tendency to flag any
+    niche tag for deprecation.
     """
     from ..apply import DeprecateProposal as _DeprecateProposal, MergeProposal as _MergeProposal
 
@@ -170,11 +186,18 @@ def propose_deprecate_fn(
     vocab_names = {t["name"] for t in vocab}
     tag_records = compute_tag_records(assignments)
 
-    candidates = []
-    for t in vocab:
-        usage = len(tag_records.get(t["name"], []))
-        if usage <= max_usage:
-            candidates.append((t, usage))
+    # If focus names specific tags, restrict candidates to those. Otherwise
+    # fall back to "all tags with usage <= max_usage".
+    focus_tags = _extract_focus_tags(focus, vocab)
+    if focus_tags:
+        candidates = [(t, len(tag_records.get(t["name"], []))) for t in vocab if t["name"] in focus_tags]
+        print(f"  [propose_deprecate] focus restricts evaluation to {focus_tags}", flush=True)
+    else:
+        candidates = []
+        for t in vocab:
+            usage = len(tag_records.get(t["name"], []))
+            if usage <= max_usage:
+                candidates.append((t, usage))
     candidates.sort(key=lambda x: x[1])
 
     proposals: list = []

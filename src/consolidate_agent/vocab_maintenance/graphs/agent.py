@@ -199,26 +199,55 @@ def build_agent_graph(
         return {"proposals": list(proposals), "rec": rec}
 
     def apply_node(state: AgentLoopState) -> dict:
+        """Apply each proposal independently. Partial success is acceptable.
+
+        Previously this was all-or-nothing: any failure rolled back the entire
+        batch including innocent proposals. Now each proposal is tried in its
+        own try/except. The action is only blocked if EVERY proposal failed.
+        """
         logger = get_default_logger()
-        new_vocab, new_assignments = state["vocab"], state["assignments"]
-        try:
-            for p in state["proposals"]:
-                new_vocab, new_assignments = apply_proposal(new_vocab, new_assignments, p)
-        except (InvalidProposal, OrphanError) as e:
+        cur_vocab, cur_assignments = state["vocab"], state["assignments"]
+        successes: list = []
+        failures: list[tuple[Any, Exception]] = []
+
+        for p in state["proposals"]:
+            try:
+                cur_vocab, cur_assignments = apply_proposal(cur_vocab, cur_assignments, p)
+                successes.append(p)
+            except (InvalidProposal, OrphanError) as e:
+                failures.append((p, e))
+                logger.event("apply.proposal_skipped",
+                             iter=state["iter"], action=state["action"],
+                             error_type=type(e).__name__, error=str(e)[:200])
+
+        # All failed → traditional apply_error path (block action for this run)
+        if not successes:
             rec = dict(state["rec"])
             rec["result"] = "apply_error"
-            rec["error"] = f"{type(e).__name__}: {e}"
+            first_err = failures[0][1] if failures else None
+            rec["error"] = (
+                f"all {len(failures)} proposals failed; first: "
+                f"{type(first_err).__name__}: {first_err}"
+            )
             rec["hit_rate_after"] = rec["hit_rate_before"]
             blocked = list(state.get("blocked_actions", []))
             if state["action"] not in blocked:
                 blocked.append(state["action"])
             rec["blocked_actions_after"] = sorted(blocked)
             logger.event("agent.iter.done", iter=state["iter"], action=state["action"],
-                         result="apply_error", error=rec["error"])
+                         result="apply_error", error=rec["error"],
+                         attempts=len(state["proposals"]))
             return {"rec": rec, "iter_result": "apply_error", "blocked_actions": blocked}
 
-        check_invariants(new_vocab, new_assignments)
-        return {"new_vocab": new_vocab, "new_assignments": new_assignments}
+        # At least one succeeded → commit the partial result.
+        check_invariants(cur_vocab, cur_assignments)
+        if failures:
+            print(f"  [apply] {len(successes)}/{len(state['proposals'])} succeeded; "
+                  f"{len(failures)} skipped (invariant violations)", flush=True)
+            logger.event("apply.partial_success",
+                         iter=state["iter"], action=state["action"],
+                         succeeded=len(successes), failed=len(failures))
+        return {"new_vocab": cur_vocab, "new_assignments": cur_assignments}
 
     def post_apply_measure_node(state: AgentLoopState) -> dict:
         """Re-compute diagnostics after a successful apply."""
