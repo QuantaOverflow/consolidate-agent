@@ -67,6 +67,7 @@ class TagRecordNetwork:
     vocab: list[dict]
     assignments: list[dict]
     metadata: dict = field(default_factory=dict)
+    themes: dict[str, str] = field(default_factory=dict)  # record_id → distilled theme (optional cache)
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -139,6 +140,9 @@ class TagRecordNetwork:
 
             vocab = result["vocab"]
             assignments = result["assignments"]
+            # Extract themes from graph state (list[{record_id, title, theme}]) → dict[record_id, str]
+            theme_records = result.get("themes", [])
+            themes_dict = {t["record_id"]: t["theme"] for t in theme_records if t.get("theme")}
 
         if result.get("fake_tag_drops", 0):
             print(f"[bootstrap] filtered {result['fake_tag_drops']} vocab-external tag refs", flush=True)
@@ -154,7 +158,7 @@ class TagRecordNetwork:
             "bootstrap_thread_id": thread_id,
             "synthesize_attempts": result.get("synthesize_attempts", 1),
         }
-        network = cls(vocab=vocab, assignments=assignments, metadata=metadata)
+        network = cls(vocab=vocab, assignments=assignments, themes=themes_dict, metadata=metadata)
         network.validate()
         return network
 
@@ -174,6 +178,7 @@ class TagRecordNetwork:
             vocab=data["vocab"],
             assignments=data["assignments"],
             metadata=meta,
+            themes=data.get("themes", {}),  # optional; defaults to {} for older snapshots
         )
         network.validate()
         return network
@@ -224,6 +229,7 @@ class TagRecordNetwork:
                     "vocab": self.vocab,
                     "assignments": self.assignments,
                     "metadata": self.metadata,
+                    "themes": self.themes,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -414,7 +420,8 @@ class TagRecordNetwork:
         if len(pending) < propose_threshold:
             return [], 0
 
-        _propose_new = propose_new_fn or _default_propose_new(db_path)
+        # Pass self.themes so propose_new uses cached themes + writes new ones back
+        _propose_new = propose_new_fn or _default_propose_new(db_path, themes_cache=self.themes)
         candidates = _propose_new(self.vocab, self.assignments, "")  # focus="" — full pool
         if not candidates:
             return [], 0
@@ -478,12 +485,12 @@ def _default_reverse_check(records: list[dict], vocab: list[dict], concurrency: 
     return reverse_check_subset(records, vocab, batch_size=10, concurrency=concurrency)
 
 
-def _default_propose_new(db_path: Path | None) -> Callable:
-    """Build a propose_new adapter closed over db_path."""
+def _default_propose_new(db_path: Path | None, themes_cache: dict[str, str] | None = None) -> Callable:
+    """Build a propose_new adapter closed over db_path + optional themes cache."""
     from .propose.new import propose_new_fn as _propose_new
 
     def adapter(vocab, assignments, focus):
-        return _propose_new(vocab, assignments, focus, db_path=db_path)
+        return _propose_new(vocab, assignments, focus, db_path=db_path, themes_cache=themes_cache)
 
     return adapter
 

@@ -142,10 +142,16 @@ def propose_new_fn(
     *,
     db_path: Path | None = None,
     batch_size: int = 30,
+    themes_cache: dict[str, str] | None = None,
 ):
     """In-memory propose_new for agent loop.
 
-    Pipeline: missing records → distill → synthesize-with-vocab → NewTagProposal list.
+    Pipeline: missing records → distill (or cache hit) → synthesize-with-vocab → NewTagProposal list.
+
+    If themes_cache is provided, records with cached themes skip re-distill.
+    The cache is MUTATED in-place: newly distilled themes get written back
+    so subsequent calls reuse them. Pass network.themes to enable this.
+
     focus is appended to synthesize prompt to guide candidate generation.
     """
     from ..apply import NewTagProposal as _NewTagProposal
@@ -172,8 +178,24 @@ def propose_new_fn(
     if not missing:
         return []
 
-    # Step 1: distill (in-memory, no cache)
-    themes = distill_records(model_factory, missing, batch_size)
+    # Step 1: distill — use themes_cache when available, distill the rest, write back.
+    cache = themes_cache if themes_cache is not None else {}
+    to_distill = [r for r in missing if r["record_id"] not in cache]
+    if to_distill:
+        print(f"  [propose_new] distill {len(to_distill)} uncached / {len(missing)} missing", flush=True)
+        new_themes = distill_records(model_factory, to_distill, batch_size)
+        for entry in new_themes:
+            if entry.get("theme"):
+                cache[entry["record_id"]] = entry["theme"]
+    else:
+        print(f"  [propose_new] all {len(missing)} themes from cache (zero distill LLM)", flush=True)
+
+    # Build themes list in same order as `missing`
+    themes = [
+        {"record_id": r["record_id"], "title": r["title"], "theme": cache.get(r["record_id"], "")}
+        for r in missing
+    ]
+    themes = [t for t in themes if t["theme"]]  # drop any that still lack a theme
 
     # Step 2: synthesize with focus hint
     syn_model = model_factory().with_structured_output(SynthesisWithVocabOutput)

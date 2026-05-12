@@ -253,6 +253,48 @@ def test_n13_save_atomic_no_tmp_left():
 
 
 @test
+def test_n15_themes_save_load_roundtrip():
+    vocab = mk_vocab([("a", "def a")])
+    assignments = mk_assignments({"r1": ["a"], "r2": ["a"]})
+    themes = {"r1": "theme for r1", "r2": "theme for r2"}
+    net = TagRecordNetwork(vocab=vocab, assignments=assignments, themes=themes)
+
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "net.json"
+        net.save(path)
+        loaded = TagRecordNetwork.load(path)
+
+    assert loaded.themes == themes
+
+
+@test
+def test_n16_load_legacy_snapshot_defaults_themes_empty():
+    """Old snapshots written before themes-as-first-class load with themes={}."""
+    vocab = mk_vocab([("a", "def a")])
+    assignments = mk_assignments({"r1": ["a"]})
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "net.json"
+        path.write_text(json.dumps({
+            "vocab": vocab,
+            "assignments": assignments,
+            "metadata": {"schema_version": SCHEMA_VERSION, "vocab_hash": _vocab_hash(vocab)},
+            # NOTE: no "themes" key — old snapshot format
+        }), encoding="utf-8")
+        net = TagRecordNetwork.load(path)
+    assert net.themes == {}
+
+
+@test
+def test_n17_themes_default_empty_on_construct():
+    vocab = mk_vocab([("a", "def a")])
+    assignments = mk_assignments({"r1": ["a"]})
+    net = TagRecordNetwork(vocab=vocab, assignments=assignments)
+    assert net.themes == {}
+    # Empty themes shouldn't break validate
+    net.validate()
+
+
+@test
 def test_n14_apply_updates_metadata():
     vocab = mk_vocab([("a", "def a")])
     assignments = mk_assignments({"r1": ["a"]})
