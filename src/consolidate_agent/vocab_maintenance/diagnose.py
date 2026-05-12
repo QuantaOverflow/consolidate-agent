@@ -20,7 +20,7 @@ from consolidate_agent.config import Settings
 from consolidate_agent.consolidation._utils import _chat_model
 
 from .observability import get_default_logger, invoke_with_retry
-from .probes import run_probe
+from .probes import compute_fit_signals, run_probe
 from .similarity import find_similar_pairs
 
 
@@ -97,10 +97,19 @@ tag size distribution (bottom 5, excluding 0):
 ## Suspected redundancy pairs (high definition similarity — may indicate near-synonyms)
 {similar_pairs}
 
+## Forced-fit candidates (tags whose attached records sit FAR from the tag definition on average — likely expand_coverage false positives or stale assignments)
+{forced_fit}
+
+## Orphan rate (sampled {orphan_sampled} records, % with max cosine to ANY tag < 0.5)
+{orphan_pct}%
+
 ## Already-tried actions (BLOCKED — structurally removed from next_action choices)
 {blocked_actions}
 
 Plan probes to verify suspicious signals. Pay attention to suspected redundancy pairs — if any pair has high def similarity, probe it before deciding action.
+
+If "Forced-fit candidates" has entries → probe each with `inspect_outliers(name=X, n=5)` to see which specific records dragged the mean down.
+If orphan rate > 15% (vocab gap) OR no other signal stands out (sanity sweep when vocab looks healthy) → run `find_orphan_themes(n=10)` once to catch what the LLM-based signals miss.
 
 Blocked actions are not in your decision schema this round; you can only choose among remaining actions or 'done'. Plan probes accordingly — don't probe signals that only support a blocked action."""
 
@@ -215,6 +224,15 @@ def _similar_pairs_str(pairs: list[dict]) -> str:
     return "\n".join(f"  {p['similarity']:.3f}  {p['tag_a']} ↔ {p['tag_b']}" for p in pairs)
 
 
+def _forced_fit_str(candidates: list[dict]) -> str:
+    if not candidates:
+        return "  (none — all tags' records are on-topic on average)"
+    return "\n".join(
+        f"  mean_fit={c['mean_fit']:.3f}  {c['tag']}  (n={c['sample']})"
+        for c in candidates
+    )
+
+
 def _decision_model_for(allowed_actions: tuple[str, ...]) -> type[BaseModel]:
     """Build a DiagnosticDecision variant whose next_action Literal is restricted.
 
@@ -254,6 +272,8 @@ def diagnose(
 
     # Pre-compute suspected redundancy pairs via def cosine similarity
     similar_pairs = find_similar_pairs(vocab, threshold=0.80, top_n=5)
+    # Pre-compute per-record fit signals — point LLM at outliers / orphans
+    fit_signals = compute_fit_signals(vocab, assignments, db_path)
     blocked_str = ", ".join(blocked_actions) if blocked_actions else "(none)"
 
     # Step 1: plan
@@ -269,6 +289,9 @@ def diagnose(
         "top_usage": _top_usage_str(diagnostics["tag_usage_count"]),
         "bottom_usage": _bottom_usage_str(diagnostics["tag_usage_count"]),
         "similar_pairs": _similar_pairs_str(similar_pairs),
+        "forced_fit": _forced_fit_str(fit_signals["forced_fit_candidates"]),
+        "orphan_pct": fit_signals["orphan_pct"],
+        "orphan_sampled": fit_signals["sampled"],
         "blocked_actions": blocked_str,
     })
     logger = get_default_logger()
@@ -314,6 +337,7 @@ def diagnose(
         return {
             "plan": plan.model_dump(),
             "similar_pairs": similar_pairs,
+            "fit_signals": fit_signals,
             "probe_calls": list(plan.probe_calls_needed[:3]),
             "findings": findings,
             "decision": {
@@ -331,6 +355,7 @@ def diagnose(
     return {
         "plan": plan.model_dump(),
         "similar_pairs": similar_pairs,  # exposed to reviewer; no auto-downgrade
+        "fit_signals": fit_signals,      # forced_fit + orphan_pct precomputed
         "probe_calls": list(plan.probe_calls_needed[:3]),
         "findings": findings,
         "decision": decision.model_dump(),

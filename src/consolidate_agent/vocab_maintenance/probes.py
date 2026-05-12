@@ -25,6 +25,85 @@ def _load_record_details(db_path: Path, record_ids: list[str]) -> dict[str, dict
     return {r["record_id"]: {"title": r["title"], "insight": r["insight"]} for r in rows}
 
 
+def compute_fit_signals(
+    vocab: list[dict], assignments: list[dict], db_path: Path,
+    max_records: int = 300, low_fit_threshold: float = 0.5, min_tag_sample: int = 5,
+) -> dict:
+    """Cheap pre-flight signals that point the LLM at the new probes.
+
+    Returns two structured signals (no LLM):
+    - `forced_fit_candidates`: tags whose attached records on average sit far
+      from the tag definition (mean cosine < threshold). These are the prime
+      targets for `inspect_outliers`.
+    - `orphan_pct`: percentage of sampled records whose max cosine to ANY
+      vocab tag stays below threshold. High value → vocab gap; deserves a
+      `find_orphan_themes` sweep.
+
+    Computed once per diagnose round. Embedding calls go through the LRU
+    cache (similarity._embed, 4096 slots), so steady-state cost is small.
+    """
+    from collections import defaultdict
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .similarity import _embed, cosine
+
+    if not vocab or not assignments:
+        return {"forced_fit_candidates": [], "orphan_pct": 0.0, "orphan_count": 0, "sampled": 0}
+
+    sample = [a for a in assignments if not a.get("missing")][:max_records]
+    record_ids = [a["record_id"] for a in sample]
+    details = _load_record_details(db_path, record_ids)
+
+    # Concurrent embed — same 5-worker cap as bootstrap to stay under throttling.
+    texts: list[tuple[str, str]] = [("__tag__:" + t["name"], t["definition"]) for t in vocab]
+    for a in sample:
+        d = details.get(a["record_id"])
+        if not d:
+            continue
+        texts.append((a["record_id"], f"{d['title']}: {d['insight'][:200]}"))
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        vecs = list(ex.map(lambda kv: (kv[0], _embed(kv[1])), texts))
+    embs = dict(vecs)
+    tag_embs = {t["name"]: embs["__tag__:" + t["name"]] for t in vocab}
+
+    tag_fits: dict[str, list[float]] = defaultdict(list)
+    orphan_count = 0
+    sampled_actual = 0
+    for a in sample:
+        rec_emb = embs.get(a["record_id"])
+        if rec_emb is None:
+            continue
+        sampled_actual += 1
+        max_sim = 0.0
+        for name, te in tag_embs.items():
+            s = cosine(rec_emb, te)
+            if s > max_sim:
+                max_sim = s
+        if max_sim < low_fit_threshold:
+            orphan_count += 1
+        for t in a.get("selected_tags", []):
+            te = tag_embs.get(t["name"])
+            if te is not None:
+                tag_fits[t["name"]].append(cosine(rec_emb, te))
+
+    forced_fit = []
+    for tag, fits in tag_fits.items():
+        if len(fits) < min_tag_sample:
+            continue
+        mean = sum(fits) / len(fits)
+        if mean < low_fit_threshold:
+            forced_fit.append({"tag": tag, "mean_fit": round(mean, 3), "sample": len(fits)})
+    forced_fit.sort(key=lambda x: x["mean_fit"])
+
+    return {
+        "forced_fit_candidates": forced_fit[:5],
+        "orphan_pct": round(100 * orphan_count / max(1, sampled_actual), 1),
+        "orphan_count": orphan_count,
+        "sampled": sampled_actual,
+    }
+
+
 def inspect_missing_records(assignments: list[dict], db_path: Path, n: int = 10) -> list[dict]:
     """Return n missing records with title + insight excerpt + LLM's missing_concept guess."""
     missing = [a for a in assignments if a.get("missing")][:n]
