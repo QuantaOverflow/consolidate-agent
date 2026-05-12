@@ -135,9 +135,11 @@ def judge_pair(
         "evidence_count": len(evidence_records),
         "evidence": format_evidence(evidence_records),
     })
-    result: MergeJudgement | None = model.invoke(messages)
-    if result is None:
-        result = model.invoke(messages)  # retry once
+    from ..observability import invoke_with_retry
+    result: MergeJudgement | None = invoke_with_retry(
+        model, messages, retries=3,
+        caller=f"propose_merge.{tag_a['name']}+{tag_b['name']}",
+    )
     return result
 
 
@@ -154,10 +156,14 @@ def propose_merge_fn(
     """In-memory propose_merge for agent loop.
 
     Returns list of MergeProposal objects (from vocab_maintenance.apply).
-    focus is currently advisory — embedded in prompt for context but doesn't
-    change candidate selection.
+
+    If `focus` names specific vocab tags, candidate pairs are restricted:
+      - 1 focus tag: pairs containing it (min_cooccur bypassed)
+      - 2+ focus tags: pairs entirely within the focus set (min_cooccur bypassed)
+    Otherwise falls back to top-K co-occurring pairs with cooccur >= min_cooccur.
     """
     from ..apply import MergeProposal as _MergeProposal
+    from .deprecate import _extract_focus_tags
 
     settings = Settings()
     model = _chat_model(settings).with_structured_output(MergeJudgement)
@@ -168,7 +174,19 @@ def propose_merge_fn(
 
     vocab_by_name = {t["name"]: t for t in vocab}
     pair_counts, tag_record_ids, tag_usage = compute_cooccurrence(assignments)
-    candidates = [(p, c) for p, c in pair_counts.most_common(top_k * 2) if c >= min_cooccur][:top_k]
+
+    focus_tags = _extract_focus_tags(focus, vocab)
+    if focus_tags:
+        focus_set = set(focus_tags)
+        if len(focus_set) == 1:
+            candidates = [(p, c) for p, c in pair_counts.most_common()
+                          if p[0] in focus_set or p[1] in focus_set][:top_k]
+        else:
+            candidates = [(p, c) for p, c in pair_counts.most_common()
+                          if p[0] in focus_set and p[1] in focus_set][:top_k]
+        print(f"  [propose_merge] focus restricts to {len(candidates)} pair(s) within {sorted(focus_set)}", flush=True)
+    else:
+        candidates = [(p, c) for p, c in pair_counts.most_common(top_k * 2) if c >= min_cooccur][:top_k]
 
     proposals: list = []
     for pair, count in candidates:
