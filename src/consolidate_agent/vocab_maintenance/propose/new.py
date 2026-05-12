@@ -25,13 +25,7 @@ from pydantic import BaseModel, Field
 from consolidate_agent.config import Settings
 from consolidate_agent.consolidation._utils import _chat_model
 
-# Reuse distill primitives from bootstrap pipeline
-from ..bootstrap import (
-    DISTILL_SYSTEM,
-    DISTILL_USER,
-    DistillBatchOutput,
-    format_records_for_distill,
-)
+# distill_records below is now a thin wrapper around bootstrap.distill_step.
 
 
 # ── Synthesize-with-vocab schema ───────────────────────────────────────────────
@@ -109,41 +103,10 @@ def format_themes(themes: list[str]) -> str:
     return "\n".join(f"[{i}] {t}" for i, t in enumerate(themes))
 
 
-def distill_records(model_factory, records: list[dict], batch_size: int) -> list[dict]:
-    """Distill records into themes (no tags)."""
-    distill_model = model_factory().with_structured_output(DistillBatchOutput)
-    distill_prompt = ChatPromptTemplate.from_messages([
-        ("system", DISTILL_SYSTEM),
-        ("user", DISTILL_USER),
-    ])
-
-    total_batches = (len(records) + batch_size - 1) // batch_size
-    all_themes: list[dict] = []
-
-    for batch_idx in range(total_batches):
-        start = batch_idx * batch_size
-        end = min(start + batch_size, len(records))
-        batch_records = records[start:end]
-
-        t0 = time.perf_counter()
-        messages = distill_prompt.invoke({
-            "batch_size": len(batch_records),
-            "records": format_records_for_distill(batch_records),
-        })
-        result: DistillBatchOutput = distill_model.invoke(messages)
-        elapsed = time.perf_counter() - t0
-
-        themes_by_idx = {t.record_idx: t.theme for t in result.themes}
-        for rec_idx, rec in enumerate(batch_records, 1):
-            all_themes.append({
-                "record_id": rec["record_id"],
-                "title": rec["title"],
-                "theme": themes_by_idx.get(rec_idx, "").strip(),
-            })
-
-        print(f"  distill batch {batch_idx + 1}/{total_batches}  records={len(batch_records)}  ({elapsed:.1f}s)", flush=True)
-
-    return all_themes
+def distill_records(model_factory, records: list[dict], batch_size: int, *, concurrency: int = 10) -> list[dict]:
+    """Thin wrapper around bootstrap.distill_step (parallel) for backward-compat."""
+    from ..bootstrap import distill_step
+    return distill_step(model_factory, records, batch_size, log_file=None, concurrency=concurrency)
 
 
 def synthesize_with_vocab(model_factory, themes: list[dict], vocab: list[dict]) -> SynthesisWithVocabOutput:

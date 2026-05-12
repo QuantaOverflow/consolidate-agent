@@ -124,8 +124,61 @@ def format_themes_for_synthesize(themes: list[str]) -> str:
 # ── Pipeline ───────────────────────────────────────────────────────────────────
 
 
-def distill_step(model_factory, records: list[dict], batch_size: int, log_file) -> list[dict]:
-    """Returns list of {record_id, title, theme}."""
+def _distill_single_batch(
+    batch_idx: int,
+    batch_records: list[dict],
+    distill_model,
+    distill_prompt,
+    total_batches: int,
+) -> tuple[int, list[dict], float, str | None]:
+    """Run one distill batch. Thread-safe (no shared state mutation).
+
+    Returns (batch_idx, themes_list, elapsed, error_str_or_None).
+    On failure: themes_list=[], error_str describes the exception.
+    """
+    t0 = time.perf_counter()
+    try:
+        messages = distill_prompt.invoke({
+            "batch_size": len(batch_records),
+            "records": format_records_for_distill(batch_records),
+        })
+        result: DistillBatchOutput = distill_model.invoke(messages)
+    except Exception as exc:  # noqa: BLE001
+        return batch_idx, [], time.perf_counter() - t0, str(exc)[:200]
+
+    elapsed = time.perf_counter() - t0
+    themes_by_idx = {t.record_idx: t.theme for t in result.themes}
+    batch_out = [
+        {
+            "record_id": rec["record_id"],
+            "title": rec["title"],
+            "theme": themes_by_idx.get(rec_idx, "").strip(),
+        }
+        for rec_idx, rec in enumerate(batch_records, 1)
+    ]
+    return batch_idx, batch_out, elapsed, None
+
+
+def distill_step(
+    model_factory,
+    records: list[dict],
+    batch_size: int,
+    log_file=None,
+    *,
+    concurrency: int = 10,
+) -> list[dict]:
+    """Distill records into themes via parallel LLM batches.
+
+    Returns list of {record_id, title, theme}, preserving input record order.
+
+    Args:
+        log_file: optional .write/.flush sink. If provided, per-batch metric
+            lines are written (under a lock for thread safety).
+        concurrency: ThreadPoolExecutor workers. 1 = serial.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
     distill_model = model_factory().with_structured_output(DistillBatchOutput)
     distill_prompt = ChatPromptTemplate.from_messages([
         ("system", DISTILL_SYSTEM),
@@ -133,53 +186,55 @@ def distill_step(model_factory, records: list[dict], batch_size: int, log_file) 
     ])
 
     total_batches = (len(records) + batch_size - 1) // batch_size
-    all_themes: list[dict] = []
-
+    batches = []
     for batch_idx in range(total_batches):
         start = batch_idx * batch_size
         end = min(start + batch_size, len(records))
-        batch_records = records[start:end]
+        batches.append((batch_idx, records[start:end]))
 
-        t0 = time.perf_counter()
-        try:
-            messages = distill_prompt.invoke({
-                "batch_size": len(batch_records),
-                "records": format_records_for_distill(batch_records),
-            })
-            result: DistillBatchOutput = distill_model.invoke(messages)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  batch {batch_idx + 1}/{total_batches} FAILED: {exc}", flush=True)
-            log_file.write(json.dumps({"phase": "distill", "batch": batch_idx + 1, "error": str(exc)}) + "\n")
-            log_file.flush()
-            continue
+    log_lock = threading.Lock()
 
-        elapsed = time.perf_counter() - t0
+    def _emit_batch_result(batch_idx, batch_out, elapsed, err):
+        with log_lock:
+            if err:
+                print(f"  distill batch {batch_idx + 1}/{total_batches} FAILED: {err}", flush=True)
+                if log_file is not None:
+                    log_file.write(json.dumps({"phase": "distill", "batch": batch_idx + 1, "error": err}) + "\n")
+                    log_file.flush()
+            else:
+                print(f"  distill batch {batch_idx + 1}/{total_batches}  records={len(batch_out)}  "
+                      f"themes={len([t for t in batch_out if t['theme']])}  ({elapsed:.1f}s)", flush=True)
+                if log_file is not None:
+                    log_file.write(json.dumps({
+                        "phase": "distill",
+                        "batch": batch_idx + 1,
+                        "records": len(batch_out),
+                        "themes_produced": len([t for t in batch_out if t["theme"]]),
+                        "elapsed_sec": round(elapsed, 2),
+                    }, ensure_ascii=False) + "\n")
+                    log_file.flush()
 
-        # align by record_idx (1-based in LLM output)
-        themes_by_idx = {t.record_idx: t.theme for t in result.themes}
-        batch_out = []
-        for rec_idx, rec in enumerate(batch_records, 1):
-            theme = themes_by_idx.get(rec_idx, "").strip()
-            batch_out.append({
-                "record_id": rec["record_id"],
-                "title": rec["title"],
-                "theme": theme,
-            })
+    results_by_idx: dict[int, list[dict]] = {}
+    if concurrency <= 1:
+        # Serial fallback (useful for debugging / strict order)
+        for idx, recs in batches:
+            r_idx, batch_out, elapsed, err = _distill_single_batch(
+                idx, recs, distill_model, distill_prompt, total_batches,
+            )
+            results_by_idx[r_idx] = batch_out
+            _emit_batch_result(r_idx, batch_out, elapsed, err)
+    else:
+        with ThreadPoolExecutor(max_workers=concurrency) as ex:
+            futures = {
+                ex.submit(_distill_single_batch, idx, recs, distill_model, distill_prompt, total_batches): idx
+                for idx, recs in batches
+            }
+            for fut in as_completed(futures):
+                r_idx, batch_out, elapsed, err = fut.result()
+                results_by_idx[r_idx] = batch_out
+                _emit_batch_result(r_idx, batch_out, elapsed, err)
 
-        all_themes.extend(batch_out)
-
-        log_file.write(json.dumps({
-            "phase": "distill",
-            "batch": batch_idx + 1,
-            "records": len(batch_records),
-            "themes_produced": len([t for t in batch_out if t["theme"]]),
-            "elapsed_sec": round(elapsed, 2),
-        }, ensure_ascii=False) + "\n")
-        log_file.flush()
-
-        print(f"  distill batch {batch_idx + 1}/{total_batches}  records={len(batch_records)}  themes={len([t for t in batch_out if t['theme']])}  ({elapsed:.1f}s)", flush=True)
-
-    return all_themes
+    return [r for i in sorted(results_by_idx) for r in results_by_idx[i]]
 
 
 def synthesize_step(
