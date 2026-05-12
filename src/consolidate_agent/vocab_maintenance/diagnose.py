@@ -76,7 +76,12 @@ Available probes:
 - find_orphan_themes(n=10) — across a sample of records, list those whose MAX similarity to ANY vocab tag is lowest. Two failure modes appear here: (a) records with low max_sim AND missing=False → reverse_check likely forced a bad fit; (b) records with low max_sim AND missing=True → confirms vocab has a real gap; (c) records with high max_sim to a tag NOT in current_tags → potential missing co-tag or wrong assignment.
 - compare_tag_records(tag_a=X, tag_b=Y) — compare two tags' record sets
 
-Be conservative: if signals look weak/balanced, don't probe everything — just say "vocab looks healthy, minimal probes needed"."""
+Be conservative: if signals look weak/balanced, don't probe everything — just say "vocab looks healthy, minimal probes needed".
+
+Cross-iter awareness — when the user message includes a "Recent iters" table, use it. Each row shows what was attempted, the result, and per-dim metric deltas (Δcov, Δcoh, Δdis, Δgra, Δma). Patterns to watch:
+- Same action just rolled back -> it's already in blocked_actions; pick something else.
+- A dim has been drifting downward across multiple iters -> probe what's pushing it.
+- Several consecutive iters with near-zero delta -> vocab may have converged; lean toward 'done'."""
 
 
 PLAN_USER = """## Current vocab ({vocab_count} tags)
@@ -102,6 +107,9 @@ tag size distribution (bottom 5, excluding 0):
 
 ## Orphan rate (sampled {orphan_sampled} records, % with max cosine to ANY tag < 0.5)
 {orphan_pct}%
+
+## Recent iters (last {history_count}; empty on first iter)
+{iter_history}
 
 ## Already-tried actions (BLOCKED — structurally removed from next_action choices)
 {blocked_actions}
@@ -233,6 +241,31 @@ def _forced_fit_str(candidates: list[dict]) -> str:
     )
 
 
+def _iter_history_str(iter_deltas: list[dict], last_n: int = 3) -> str:
+    """Render the last N completed iters as a compact trajectory table.
+
+    Columns: iter | action | result | Δcoverage Δcoherence Δdistinct Δgranul Δmulti.
+    Empty list -> placeholder so the prompt stays well-formed on iter 1.
+    """
+    if not iter_deltas:
+        return "  (no prior iters — this is iter 1)"
+    rows = iter_deltas[-last_n:]
+    lines = [
+        "  iter | action             | result        | Δcov    Δcoh    Δdis    Δgra    Δma",
+        "  -----+--------------------+---------------+---------------------------------------",
+    ]
+    for r in rows:
+        d = r.get("delta", {})
+        lines.append(
+            f"  {r.get('iter', '?'):>4} | {r.get('action', ''):<18} | "
+            f"{r.get('result', ''):<13} | "
+            f"{d.get('coverage', 0):+.3f}  {d.get('coherence', 0):+.3f}  "
+            f"{d.get('distinctness', 0):+.3f}  {d.get('granularity', 0):+.3f}  "
+            f"{d.get('multi_axis', 0):+.3f}"
+        )
+    return "\n".join(lines)
+
+
 def _decision_model_for(allowed_actions: tuple[str, ...]) -> type[BaseModel]:
     """Build a DiagnosticDecision variant whose next_action Literal is restricted.
 
@@ -254,6 +287,7 @@ def diagnose(
     assignments: list[dict],
     db_path: Path,
     blocked_actions: list[str] | None = None,
+    iter_deltas: list[dict] | None = None,
 ) -> dict:
     settings = Settings()
     plan_model = _chat_model(settings).with_structured_output(PlanOutput)
@@ -277,6 +311,7 @@ def diagnose(
     blocked_str = ", ".join(blocked_actions) if blocked_actions else "(none)"
 
     # Step 1: plan
+    iter_deltas = iter_deltas or []
     plan_msg = plan_prompt.invoke({
         "vocab_count": len(vocab),
         "vocab_brief": _vocab_brief(vocab),
@@ -292,6 +327,8 @@ def diagnose(
         "forced_fit": _forced_fit_str(fit_signals["forced_fit_candidates"]),
         "orphan_pct": fit_signals["orphan_pct"],
         "orphan_sampled": fit_signals["sampled"],
+        "iter_history": _iter_history_str(iter_deltas, last_n=3),
+        "history_count": min(len(iter_deltas), 3),
         "blocked_actions": blocked_str,
     })
     logger = get_default_logger()

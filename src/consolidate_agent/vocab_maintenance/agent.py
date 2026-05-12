@@ -95,20 +95,26 @@ class Agent:
         diagnose_fn: Callable[..., dict],
         propose_fns: dict[str, Callable[..., list]],
         max_iter: int = 5,
-        hit_rate_regression_threshold: float = 0.03,
         disabled_actions: set[str] | frozenset[str] | None = None,
         checkpoint_db: Path | None = None,
+        health_fn: Callable | None = None,
+        judge_fn: Callable | None = None,
     ):
         self.measure_fn = measure_fn
         self.diagnose_fn = diagnose_fn
         self.propose_fns = propose_fns
         self.max_iter = max_iter
-        self.hit_rate_regression_threshold = hit_rate_regression_threshold
         # Permanently-blocked actions (e.g., maintenance disables propose_new
         # because the growth path lives in ingest_batch, not in the agent loop).
         self.disabled_actions: set[str] = set(disabled_actions or ())
         # Optional persistent checkpoint backend; None → MemorySaver.
         self.checkpoint_db: Path | None = checkpoint_db
+        # Phase A: optional health_fn(vocab, assignments) -> HealthMetrics.
+        # When provided, 5-dim metrics flow into metrics_history + iter_deltas.
+        self.health_fn = health_fn
+        # Phase B: optional judge_fn (LLM-as-judge). Replaces hit_rate gate.
+        # Requires health_fn for the before/after metrics it consumes.
+        self.judge_fn = judge_fn
 
     def run(
         self,
@@ -124,7 +130,6 @@ class Agent:
         initial_state = {
             "initial_vocab": list(initial_vocab),
             "max_iter": self.max_iter,
-            "hit_rate_regression_threshold": self.hit_rate_regression_threshold,
             "disabled_actions": list(self.disabled_actions),
             "run_id": thread_id,
         }
@@ -140,6 +145,8 @@ class Agent:
                 measure_fn=self.measure_fn,
                 diagnose_fn=self.diagnose_fn,
                 propose_fns=self.propose_fns,
+                health_fn=self.health_fn,
+                judge_fn=self.judge_fn,
             )
             result = graph.invoke(initial_state, invoke_config)
         else:

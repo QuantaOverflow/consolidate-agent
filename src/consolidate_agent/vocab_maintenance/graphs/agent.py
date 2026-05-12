@@ -20,10 +20,10 @@ Topology:
                                                               └─ has  ──→ apply ──→ route_apply
                                                                                           │
                                                                                           ├─ error ──→ record_iter ──┤
-                                                                                          └─ ok ────→ post_apply ──→ route_regression
-                                                                                                                                 │
-                                                                                                                                 ├─ rollback → record_iter ─┤
-                                                                                                                                 └─ commit  → record_iter ─┤
+                                                                                          └─ ok ────→ post_apply ──→ llm_judge ──→ route_judge
+                                                                                                                                              │
+                                                                                                                                              ├─ rollback → record_iter ─┤
+                                                                                                                                              └─ commit  → record_iter ─┤
                                                                                                                                                             │
                                                                                                                                                             ↓
                                                                                                                                           termination_check (next iter)
@@ -53,6 +53,20 @@ from .state import AgentLoopState
 
 
 ACTIONS = ("propose_new", "propose_merge", "propose_deprecate")
+_DIM_NAMES = ("coverage", "coherence", "distinctness", "granularity", "multi_axis")
+_ZERO_DELTA = {k: 0.0 for k in _DIM_NAMES}
+
+
+def _last_metrics(state: dict) -> dict[str, float]:
+    """Most recent metrics snapshot from metrics_history; empty when disabled."""
+    hist = state.get("metrics_history") or []
+    return hist[-1]["metrics"] if hist else {}
+
+
+def _diff_metrics(new: dict[str, float], prior: dict[str, float]) -> dict[str, float]:
+    if not prior:
+        return dict(_ZERO_DELTA)
+    return {k: round(new.get(k, 0.0) - prior.get(k, 0.0), 4) for k in _DIM_NAMES}
 
 
 def _hit_rate(diagnostics: dict) -> float:
@@ -82,17 +96,29 @@ def build_agent_graph(
     measure_fn: Callable,
     diagnose_fn: Callable,
     propose_fns: dict[str, Callable],
+    health_fn: Callable | None = None,
+    judge_fn: Callable | None = None,
 ):
     """Compile the maintenance agent StateGraph with the given checkpointer.
 
     measure_fn(vocab, *, action=None, current_assignments=None,
                previous_assignments=None) -> (diag, assignments)
-    diagnose_fn(vocab, diagnostics, assignments, *, blocked_actions=[]) -> dict
+    diagnose_fn(vocab, diagnostics, assignments, *, blocked_actions=[],
+                iter_deltas=[]) -> dict
         Returns either {"decision": {...}} or the decision dict directly.
+        iter_deltas is rendered as a history table in PLAN_USER from iter 2+.
     propose_fns: dict mapping action name → fn(vocab, assignments, focus) -> list
+    health_fn(vocab, assignments) -> HealthMetrics
+        Computes the 5-dim metrics. Required when judge_fn is supplied.
+        Disabled when None (legacy / unit tests) — falls back to the
+        pre-Phase-A no-metrics behavior plus the old hit_rate gate.
+    judge_fn(action, proposals, reasoning, before_metrics, after_metrics,
+             before_vocab_size, after_vocab_size) -> JudgeVerdict (optional)
+        When provided, replaces the hit_rate-threshold regression gate with
+        LLM-as-judge. Verdict drives commit/rollback routing and is recorded
+        in iter_deltas. Conservative bias on LLM failure → commit.
 
-    Config values (max_iter, regression_threshold, disabled_actions) come from
-    the initial state passed to graph.invoke.
+    Config values (max_iter, disabled_actions) come from the initial state.
     """
 
     # ── Nodes ────────────────────────────────────────────────────────────
@@ -116,7 +142,7 @@ def build_agent_graph(
             disabled_actions=sorted(disabled),
             max_iter=state.get("max_iter", 5),
         )
-        return {
+        out: dict = {
             "vocab": list(vocab),
             "assignments": list(assignments),
             "diagnostics": diag,
@@ -124,6 +150,13 @@ def build_agent_graph(
             "blocked_actions": disabled,  # start with disabled actions pre-blocked
             "history": [],
         }
+        if health_fn is not None:
+            health = health_fn(vocab, assignments)
+            metrics = health.to_dict()
+            logger.event("metrics.measured", iter=0, **metrics)
+            out["metrics_history"] = [{"iter": 0, "metrics": metrics}]
+            out["iter_deltas"] = []
+        return out
 
     def termination_check_node(state: AgentLoopState) -> dict:
         """Set final_status if any termination condition holds; else no-op."""
@@ -153,6 +186,7 @@ def build_agent_graph(
                 state["diagnostics"],
                 state["assignments"],
                 blocked_actions=sorted(state.get("blocked_actions", [])),
+                iter_deltas=list(state.get("iter_deltas", [])),
             )
         except Exception as e:
             # Fatal error — record + halt.
@@ -250,7 +284,13 @@ def build_agent_graph(
             logger.event("agent.iter.done", iter=state["iter"], action=state["action"],
                          result="apply_error", error=rec["error"],
                          attempts=len(state["proposals"]))
-            return {"rec": rec, "iter_result": "apply_error", "blocked_actions": blocked}
+            out: dict = {"rec": rec, "iter_result": "apply_error", "blocked_actions": blocked}
+            if health_fn is not None:
+                out["iter_deltas"] = [{
+                    "iter": state["iter"], "action": state["action"],
+                    "result": "apply_error", "delta": dict(_ZERO_DELTA),
+                }]
+            return out
 
         # At least one succeeded → commit the partial result.
         check_invariants(cur_vocab, cur_assignments)
@@ -263,7 +303,11 @@ def build_agent_graph(
         return {"new_vocab": cur_vocab, "new_assignments": cur_assignments}
 
     def post_apply_measure_node(state: AgentLoopState) -> dict:
-        """Re-compute diagnostics after a successful apply."""
+        """Re-compute diagnostics + 5-dim metrics after a successful apply.
+
+        Metrics are computed here (not in commit_node) so the judge sees the
+        post-apply state before deciding commit/rollback.
+        """
         new_diag, new_assignments2 = measure_fn(
             state["new_vocab"],
             action=state["action"],
@@ -272,14 +316,70 @@ def build_agent_graph(
         )
         rec = dict(state["rec"])
         rec["hit_rate_after"] = _hit_rate(new_diag)
-        return {
+        out: dict = {
             "new_diag": new_diag,
             "new_assignments": new_assignments2,
             "rec": rec,
         }
+        if health_fn is not None:
+            new_metrics = health_fn(state["new_vocab"], new_assignments2).to_dict()
+            out["new_metrics"] = new_metrics
+        return out
+
+    def llm_judge_node(state: AgentLoopState) -> dict:
+        """LLM-as-judge: decide commit/rollback/unsure based on metric deltas.
+
+        Conservative: 'unsure' routes to commit; only 'rollback' reverts.
+        Disabled (verdict="commit") when judge_fn is None — old hit_rate gate
+        falls through via route_judge.
+        """
+        logger = get_default_logger()
+        if judge_fn is None or health_fn is None:
+            # No judge configured: act as a no-op that commits.
+            return {
+                "judge_verdict": "commit",
+                "judge_reasoning": "(judge disabled)",
+                "judge_confidence": "low",
+            }
+        before = _last_metrics(state)
+        after = state.get("new_metrics") or {}
+        try:
+            verdict = judge_fn(
+                action=state["action"],
+                proposals=list(state.get("proposals", [])),
+                reasoning=(state.get("decision") or {}).get("reasoning", ""),
+                before_metrics=before,
+                after_metrics=after,
+                before_vocab_size=len(state["vocab"]),
+                after_vocab_size=len(state["new_vocab"]),
+            )
+        except Exception as e:  # noqa: BLE001 — judge LLM failures must not crash the loop
+            import traceback as _tb
+            logger.event("judge.error", iter=state["iter"], action=state["action"],
+                         error_type=type(e).__name__, error=str(e)[:200],
+                         traceback=_tb.format_exc()[:1000])
+            verdict = None
+        if verdict is None:
+            return {
+                "judge_verdict": "commit",
+                "judge_reasoning": "judge exception — defaulting to commit",
+                "judge_confidence": "low",
+            }
+        logger.event(
+            f"judge.{verdict.verdict}",
+            iter=state["iter"], action=state["action"],
+            confidence=verdict.confidence,
+            primary_concern=verdict.primary_concern[:200],
+            reasoning=verdict.reasoning[:400],
+        )
+        return {
+            "judge_verdict": verdict.verdict,
+            "judge_reasoning": verdict.reasoning,
+            "judge_confidence": verdict.confidence,
+        }
 
     def commit_node(state: AgentLoopState) -> dict:
-        """Successful apply + no regression → commit new state."""
+        """Judge said commit (or unsure → conservative commit) → adopt new state."""
         logger = get_default_logger()
         rec = dict(state["rec"])
         rec["result"] = "applied"
@@ -291,14 +391,28 @@ def build_agent_graph(
             vocab_size_after=len(state["new_vocab"]),
             hit_rate_before=round(rec["hit_rate_before"], 4),
             hit_rate_after=round(rec["hit_rate_after"], 4),
+            judge_verdict=state.get("judge_verdict", ""),
         )
-        return {
+        out: dict = {
             "vocab": state["new_vocab"],
             "assignments": state["new_assignments"],
             "diagnostics": state["new_diag"],
             "rec": rec,
             "iter_result": "applied",
         }
+        if health_fn is not None:
+            new_metrics = state.get("new_metrics") or {}
+            prior = _last_metrics(state)
+            delta = _diff_metrics(new_metrics, prior)
+            logger.event("metrics.measured", iter=state["iter"], **new_metrics)
+            out["metrics_history"] = [{"iter": state["iter"], "metrics": new_metrics}]
+            out["iter_deltas"] = [{
+                "iter": state["iter"], "action": state["action"],
+                "result": "applied", "delta": delta,
+                "judge_verdict": state.get("judge_verdict", ""),
+                "judge_reasoning": (state.get("judge_reasoning") or "")[:240],
+            }]
+        return out
 
     def rollback_node(state: AgentLoopState) -> dict:
         logger = get_default_logger()
@@ -312,8 +426,18 @@ def build_agent_graph(
             "agent.iter.done", iter=state["iter"], action=state["action"], result="rolled_back",
             hit_rate_before=round(rec["hit_rate_before"], 4),
             hit_rate_after=round(rec["hit_rate_after"], 4),
+            judge_verdict=state.get("judge_verdict", ""),
         )
-        return {"rec": rec, "iter_result": "rolled_back", "blocked_actions": blocked}
+        out: dict = {"rec": rec, "iter_result": "rolled_back", "blocked_actions": blocked}
+        if health_fn is not None:
+            # state reverts → delta is zero against prior snapshot; judge fields recorded.
+            out["iter_deltas"] = [{
+                "iter": state["iter"], "action": state["action"],
+                "result": "rolled_back", "delta": dict(_ZERO_DELTA),
+                "judge_verdict": state.get("judge_verdict", ""),
+                "judge_reasoning": (state.get("judge_reasoning") or "")[:240],
+            }]
+        return out
 
     def record_iter_node(state: AgentLoopState) -> dict:
         """Append the current iter record to history."""
@@ -325,6 +449,9 @@ def build_agent_graph(
         history.append(rec)
         return {"history": history, "rec": {}}
 
+    def _no_op_iter_delta(iter_idx: int, action: str, result: str) -> dict:
+        return {"iter": iter_idx, "action": action, "result": result, "delta": dict(_ZERO_DELTA)}
+
     def handle_blocked_node(state: AgentLoopState) -> dict:
         logger = get_default_logger()
         action = state["action"]
@@ -334,7 +461,10 @@ def build_agent_graph(
         rec["hit_rate_after"] = rec["hit_rate_before"]
         rec["blocked_actions_after"] = sorted(state.get("blocked_actions", []))
         logger.event("agent.iter.done", iter=state["iter"], action=action, result="blocked")
-        return {"rec": rec, "iter_result": "blocked"}
+        out: dict = {"rec": rec, "iter_result": "blocked"}
+        if health_fn is not None:
+            out["iter_deltas"] = [_no_op_iter_delta(state["iter"], action, "blocked")]
+        return out
 
     def handle_unknown_node(state: AgentLoopState) -> dict:
         logger = get_default_logger()
@@ -349,7 +479,10 @@ def build_agent_graph(
         rec["blocked_actions_after"] = sorted(blocked)
         logger.event("agent.iter.done", iter=state["iter"], action=action,
                      result="unknown_action", error=rec["error"])
-        return {"rec": rec, "iter_result": "unknown_action", "blocked_actions": blocked}
+        out: dict = {"rec": rec, "iter_result": "unknown_action", "blocked_actions": blocked}
+        if health_fn is not None:
+            out["iter_deltas"] = [_no_op_iter_delta(state["iter"], action, "unknown_action")]
+        return out
 
     def handle_blocked_empty_node(state: AgentLoopState) -> dict:
         logger = get_default_logger()
@@ -362,7 +495,10 @@ def build_agent_graph(
             blocked.append(action)
         rec["blocked_actions_after"] = sorted(blocked)
         logger.event("agent.iter.done", iter=state["iter"], action=action, result="blocked_empty")
-        return {"rec": rec, "iter_result": "blocked_empty", "blocked_actions": blocked}
+        out: dict = {"rec": rec, "iter_result": "blocked_empty", "blocked_actions": blocked}
+        if health_fn is not None:
+            out["iter_deltas"] = [_no_op_iter_delta(state["iter"], action, "blocked_empty")]
+        return out
 
     def finalize_done_node(state: AgentLoopState) -> dict:
         logger = get_default_logger()
@@ -415,12 +551,9 @@ def build_agent_graph(
     def route_apply(state: AgentLoopState) -> str:
         return "post_apply" if state.get("iter_result") != "apply_error" else "record"
 
-    def route_regression(state: AgentLoopState) -> str:
-        rec = state["rec"]
-        threshold = state.get("hit_rate_regression_threshold", 0.03)
-        if rec["hit_rate_after"] < rec["hit_rate_before"] - threshold:
-            return "rollback"
-        return "commit"
+    def route_judge(state: AgentLoopState) -> str:
+        """Route on the judge's verdict. 'unsure' is conservative → commit."""
+        return "rollback" if state.get("judge_verdict") == "rollback" else "commit"
 
     # ── Wire ──────────────────────────────────────────────────────────────
 
@@ -432,6 +565,7 @@ def build_agent_graph(
     g.add_node("propose", propose_node)
     g.add_node("apply", apply_node)
     g.add_node("post_apply_measure", post_apply_measure_node)
+    g.add_node("llm_judge", llm_judge_node)
     g.add_node("commit", commit_node)
     g.add_node("rollback", rollback_node)
     g.add_node("handle_blocked", handle_blocked_node)
@@ -474,9 +608,10 @@ def build_agent_graph(
         {"post_apply": "post_apply_measure", "record": "record_iter"},
     )
 
+    g.add_edge("post_apply_measure", "llm_judge")
     g.add_conditional_edges(
-        "post_apply_measure",
-        route_regression,
+        "llm_judge",
+        route_judge,
         {"commit": "commit", "rollback": "rollback"},
     )
 

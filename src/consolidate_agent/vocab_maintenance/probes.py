@@ -25,6 +25,41 @@ def _load_record_details(db_path: Path, record_ids: list[str]) -> dict[str, dict
     return {r["record_id"]: {"title": r["title"], "insight": r["insight"]} for r in rows}
 
 
+def _compute_record_tag_embeddings(
+    vocab: list[dict], assignments: list[dict], db_path: Path,
+    *, max_records: int = 300,
+) -> tuple[dict[str, tuple], dict[str, tuple], int]:
+    """One-pass concurrent embedding of all tag defs + sampled record texts.
+
+    Returns ``(tag_embs_by_name, rec_embs_by_id, sampled_count)``. Both the
+    fit-signals computation and the 5-dim health metrics consume this — the
+    LRU in similarity._embed lets repeat calls within the same iter be free,
+    but doing one explicit pass avoids cold-cache cost on first measure.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .similarity import _embed
+
+    sample = [a for a in assignments if not a.get("missing")][:max_records]
+    record_ids = [a["record_id"] for a in sample]
+    details = _load_record_details(db_path, record_ids)
+
+    texts: list[tuple[str, str]] = [("__tag__:" + t["name"], t["definition"]) for t in vocab]
+    for a in sample:
+        d = details.get(a["record_id"])
+        if not d:
+            continue
+        texts.append((a["record_id"], f"{d['title']}: {d['insight'][:200]}"))
+
+    # 5-worker cap matches bootstrap to stay under DashScope embed throttling.
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        vecs = list(ex.map(lambda kv: (kv[0], _embed(kv[1])), texts))
+    embs = dict(vecs)
+    tag_embs = {t["name"]: embs["__tag__:" + t["name"]] for t in vocab}
+    rec_embs = {a["record_id"]: embs[a["record_id"]] for a in sample if a["record_id"] in embs}
+    return tag_embs, rec_embs, len(rec_embs)
+
+
 def compute_fit_signals(
     vocab: list[dict], assignments: list[dict], db_path: Path,
     max_records: int = 300, low_fit_threshold: float = 0.5, min_tag_sample: int = 5,
@@ -43,38 +78,24 @@ def compute_fit_signals(
     cache (similarity._embed, 4096 slots), so steady-state cost is small.
     """
     from collections import defaultdict
-    from concurrent.futures import ThreadPoolExecutor
 
-    from .similarity import _embed, cosine
+    from .similarity import cosine
 
     if not vocab or not assignments:
         return {"forced_fit_candidates": [], "orphan_pct": 0.0, "orphan_count": 0, "sampled": 0}
 
-    sample = [a for a in assignments if not a.get("missing")][:max_records]
-    record_ids = [a["record_id"] for a in sample]
-    details = _load_record_details(db_path, record_ids)
-
-    # Concurrent embed — same 5-worker cap as bootstrap to stay under throttling.
-    texts: list[tuple[str, str]] = [("__tag__:" + t["name"], t["definition"]) for t in vocab]
-    for a in sample:
-        d = details.get(a["record_id"])
-        if not d:
-            continue
-        texts.append((a["record_id"], f"{d['title']}: {d['insight'][:200]}"))
-
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        vecs = list(ex.map(lambda kv: (kv[0], _embed(kv[1])), texts))
-    embs = dict(vecs)
-    tag_embs = {t["name"]: embs["__tag__:" + t["name"]] for t in vocab}
+    tag_embs, rec_embs, sampled_actual = _compute_record_tag_embeddings(
+        vocab, assignments, db_path, max_records=max_records,
+    )
 
     tag_fits: dict[str, list[float]] = defaultdict(list)
     orphan_count = 0
-    sampled_actual = 0
+    # Re-walk assignments in original order for cooccur with sampling cap.
+    sample = [a for a in assignments if not a.get("missing")][:max_records]
     for a in sample:
-        rec_emb = embs.get(a["record_id"])
+        rec_emb = rec_embs.get(a["record_id"])
         if rec_emb is None:
             continue
-        sampled_actual += 1
         max_sim = 0.0
         for name, te in tag_embs.items():
             s = cosine(rec_emb, te)

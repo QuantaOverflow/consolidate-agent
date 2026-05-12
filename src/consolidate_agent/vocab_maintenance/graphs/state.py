@@ -7,7 +7,23 @@ TypedDict (vs Pydantic) chosen for:
 """
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Annotated, TypedDict
+
+
+def _append_last_n(n: int):
+    """LangGraph reducer: concat then keep tail. Bounded history accumulator.
+
+    Nodes return ``{"field": [new_entry]}``; reducer merges into existing list
+    and trims to the last n entries so state size stays bounded across iters.
+    """
+    def reducer(left, right):
+        if right is None:
+            return list(left or [])
+        return (list(left or []) + list(right))[-n:]
+    return reducer
+
+
+_KEEP_N = 5  # last 5 iters' metrics + deltas — enough for PLAN history table
 
 
 class BootstrapState(TypedDict, total=False):
@@ -53,7 +69,6 @@ class AgentLoopState(TypedDict, total=False):
     # Inputs
     initial_vocab: list
     max_iter: int
-    hit_rate_regression_threshold: float
     disabled_actions: list
     run_id: str                          # = thread_id; used as audit run grouping key
 
@@ -73,8 +88,16 @@ class AgentLoopState(TypedDict, total=False):
     new_vocab: list
     new_assignments: list
     new_diag: dict
+    new_metrics: dict                     # Phase B: post-apply 5-dim metrics, consumed by judge + commit
+    judge_verdict: str                    # Phase B: "commit" / "rollback" / "unsure"
+    judge_reasoning: str                  # Phase B: judge's free-text explanation
+    judge_confidence: str                 # Phase B: "high" / "medium" / "low"
     rec: dict                             # current iter record being assembled
     iter_result: str                      # "applied" / "blocked" / etc, set per node
 
     # Termination
     final_status: str                     # FinalStatus.value
+
+    # Phase A — multi-dim health history (bounded reducers).
+    metrics_history: Annotated[list, _append_last_n(_KEEP_N)]   # [{iter, metrics}]
+    iter_deltas: Annotated[list, _append_last_n(_KEEP_N)]        # [{iter, action, result, delta}]

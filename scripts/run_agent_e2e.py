@@ -20,6 +20,8 @@ from pathlib import Path
 
 from consolidate_agent.vocab_maintenance.agent import Agent, FinalStatus
 from consolidate_agent.vocab_maintenance.diagnose import diagnose as diagnose_call
+from consolidate_agent.vocab_maintenance.health import measure_health
+from consolidate_agent.vocab_maintenance.judge import llm_judge
 from consolidate_agent.vocab_maintenance.measure import (
     build_diagnostics,
     load_records,
@@ -97,6 +99,13 @@ def build_measure_fn(
 def diagnose_fn(vocab, diagnostics, assignments, **kwargs):
     db = BASE / "outputs/knowledge.db"
     return diagnose_call(vocab, diagnostics, assignments, db, **kwargs)
+
+
+def build_health_fn(db_path: Path):
+    """Closure capturing db_path so the graph layer doesn't need to know it."""
+    def health_fn(vocab: list[dict], assignments: list[dict]):
+        return measure_health(vocab, assignments, db_path)
+    return health_fn
 
 
 def build_propose_fns(db_path: Path):
@@ -186,6 +195,8 @@ def main():
             propose_fns=propose_fns,
             max_iter=args.max_iter,
             disabled_actions={"propose_new"},  # growth handled by ingest_batch
+            health_fn=build_health_fn(args.db),
+            judge_fn=llm_judge,
         )
 
         t0 = time.perf_counter()

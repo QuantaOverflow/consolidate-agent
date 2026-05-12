@@ -3,7 +3,7 @@
 Snapshot of known issues in the `vocab_maintenance` subsystem. Read before
 running on real data.
 
-Last updated: 2026-05-12
+Last updated: 2026-05-13
 
 ---
 
@@ -259,6 +259,72 @@ return filtered
 
 Until one of these triggers, the soft prompt guard plus low ingest
 frequency keep risk acceptable.
+
+---
+
+## 12. LLM-as-judge: aggregate metrics under-detect small-fraction bad merges
+
+**Path**: `judge.py` — `llm_judge`
+
+**Status**: known limitation, surfaced during Phase B Scenario C testing
+(2026-05-13).
+
+When a merge affects a small fraction of records (e.g. 38/696 = 5.5%), the
+aggregate 5-dim health metrics barely move. Scenario C measured: coherence
+delta -0.002, distinctness +0.001 — well below the judge prompt's per-action
+suspicious thresholds (-0.02 to -0.05). The judge therefore commits
+borderline-bad merges that should be rolled back.
+
+**Concrete failure mode**:
+- Synthetic merge `protocol_fidelity` (usage 38) → `failure_observability`
+  (usage 16). Semantically distinct (protocol contracts vs observability
+  gaps).
+- Aggregate metrics barely moved; judge committed with high confidence
+  under neutral reviewer reasoning.
+- The missing signal: `failure_observability.mean_fit` would drop from
+  ~0.49 to ~0.35 — a clear focal regression invisible in aggregates.
+
+**Why this is currently acceptable**:
+
+1. **Probability low** — `find_similar_pairs(threshold=0.80)` in
+   `diagnose.py` prefilters merge candidates. Borderline-bad pairs
+   (def similarity 0.65–0.79 with surface-keyword confusion) are
+   long-tail.
+2. **Recovery chain exists** — next iter's `forced_fit_candidates`
+   surfaces the dragged-down tag; diagnose probes `inspect_outliers`;
+   Phase C's `propose_refine` (planned) repairs by pruning the bad
+   records and re-tuning the tag definition.
+3. **Not on hot path** — maintenance is batch / manual trigger;
+   downstream consumers don't see the intermediate bad state in real
+   time.
+
+**Fix sketch** (when triggered):
+
+```python
+# helper in health.py
+def compute_tag_mean_fit(vocab, assignments, db_path, tag_names) -> dict[str, float]:
+    """For each requested tag, mean cosine(record_emb, tag_def_emb)."""
+
+# judge prompt extension: render per-affected-tag before/after fit
+# e.g. "failure_observability mean_fit: 0.486 → 0.350 (−0.136)"
+# Affected tags come from proposals (keep_tag for merge, the tag itself
+# for deprecate). Runner closure captures db_path and passes fits to
+# llm_judge.
+```
+
+Approximately 40–60 lines: health.py helper, judge prompt expansion,
+graph node wiring, runner closure update.
+
+**Defer trigger**:
+
+- After ≥10 real maintenance runs, audit judge verdict accuracy. If
+  false-commit rate on bad merges is > 10%, implement per-tag focal
+  signals.
+- Until then: Phase C `propose_refine` is the recovery path.
+
+**Regression test**: `scripts/test_phase_b_judge_scenarios.py` (untracked)
+currently fails with `verdict=commit`. Becomes a passing assertion once
+focal signals land.
 
 ---
 
