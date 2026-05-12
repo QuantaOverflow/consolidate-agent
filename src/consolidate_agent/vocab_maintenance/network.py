@@ -466,6 +466,22 @@ class TagRecordNetwork:
         ]
 
         absorbed = sum(1 for a in re_checked if not a.get("missing"))
+
+        # Additively expand the new tags' coverage to already-assigned records
+        # whose themes are semantically close (uses embedding + LLM binary check).
+        # This fixes the propose_new asymmetry: new tags only got pending-pool
+        # records before; now they can also attach to existing records where
+        # the LLM confirms the tag is a natural additional label.
+        if self.themes:  # only if we have themes to embed; safe degradation otherwise
+            try:
+                from .propose.additive import expand_new_tag_coverage
+                additions = expand_new_tag_coverage(self, new_tag_names)
+                total_additions = sum(additions.values())
+                if total_additions:
+                    print(f"  [ingest] additively attached new tags to {total_additions} existing records", flush=True)
+            except Exception as e:  # noqa: BLE001 — non-fatal; original behavior preserved
+                print(f"  [ingest] additive coverage skipped: {e}", flush=True)
+
         return new_tag_names, absorbed
 
 

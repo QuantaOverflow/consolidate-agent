@@ -34,6 +34,45 @@ def cosine(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+def find_records_similar_to_tag(
+    themes: dict[str, str],
+    assignments: list[dict],
+    tag_definition: str,
+    *,
+    threshold: float = 0.6,
+    top_n: int = 30,
+    max_existing_tags: int = 3,
+) -> list[tuple[float, dict]]:
+    """Find already-assigned records semantically close to a tag definition.
+
+    Used by ingest's "additive re-check" — when propose_new adds a new tag,
+    this finds existing (non-missing) records whose themes match the new tag,
+    so the new tag can be additively attached to them.
+
+    Returns [(similarity, assignment_dict), ...] sorted by similarity desc,
+    capped at top_n. Records that are missing, have full tag slots, or have
+    no theme cached are skipped.
+    """
+    if not tag_definition or not themes:
+        return []
+    tag_emb = _embed(tag_definition)
+    scored: list[tuple[float, dict]] = []
+    for a in assignments:
+        if a.get("missing"):
+            continue
+        if len(a.get("selected_tags", [])) >= max_existing_tags:
+            continue
+        rid = a["record_id"]
+        theme = themes.get(rid, "")
+        if not theme:
+            continue
+        sim = cosine(tag_emb, _embed(theme))
+        if sim >= threshold:
+            scored.append((sim, a))
+    scored.sort(key=lambda x: -x[0])
+    return scored[:top_n]
+
+
 def find_similar_pairs(vocab: list[dict], threshold: float = 0.80, top_n: int = 5) -> list[dict]:
     """Compute pairwise def cosine, return pairs above threshold sorted desc.
 
