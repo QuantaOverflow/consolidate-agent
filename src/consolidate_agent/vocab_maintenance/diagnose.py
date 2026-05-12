@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Literal
 
 from langchain_core.prompts import ChatPromptTemplate
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
+
+ALL_ACTIONS = ("propose_new", "propose_merge", "propose_deprecate")
 
 from consolidate_agent.config import Settings
 from consolidate_agent.consolidation._utils import _chat_model
@@ -43,7 +45,7 @@ class DiagnosticDecision(BaseModel):
     confidence: Literal["high", "medium", "low"] = Field(description="STEP 4 — SELF-ASSESSMENT: how confident in this decision? high=probes unanimously support; medium=probes mostly support with some tension; low=genuine ambiguity, multiple defensible decisions, would benefit from human review.")
     uncertainty_reasons: list[str] = Field(default_factory=list, description="If confidence < high, list 1-3 specific reasons (e.g. 'high def similarity but distinct usage patterns', 'probe sample too small', 'records could be re-tagged either way'). Empty if confidence=high.")
 
-    next_action: Literal["propose_new", "propose_merge", "propose_deprecate", "done"] = Field(description="FINAL: which workflow to run next, or done if vocab is healthy.")
+    next_action: Literal["propose_new", "propose_merge", "propose_deprecate", "done"] = Field(description="FINAL: which workflow to run next, or done if vocab is healthy.")  # overridden dynamically per-call to exclude blocked actions
     action_focus: str = Field(default="", description="Specific guidance for the chosen workflow: e.g. 'focus on the 14 truly missing records about permission/encoding' or 'target tag X'. Empty if action=done.")
     reasoning: str = Field(description="1-sentence final synthesis.")
 
@@ -92,12 +94,12 @@ tag size distribution (bottom 5, excluding 0):
 ## Suspected redundancy pairs (high definition similarity — may indicate near-synonyms)
 {similar_pairs}
 
-## Already-tried actions (BLOCKED — do NOT pick again unless vocab has changed since)
+## Already-tried actions (BLOCKED — structurally removed from next_action choices)
 {blocked_actions}
 
 Plan probes to verify suspicious signals. Pay attention to suspected redundancy pairs — if any pair has high def similarity, probe it before deciding action.
 
-If your preferred action is in the blocked list, pick a different action or 'done'. Re-picking a blocked action wastes the iteration."""
+Blocked actions are not in your decision schema this round; you can only choose among remaining actions or 'done'. Plan probes accordingly — don't probe signals that only support a blocked action."""
 
 
 DECIDE_SYSTEM = """You are now deciding the next action based on probe findings.
@@ -189,6 +191,21 @@ def _similar_pairs_str(pairs: list[dict]) -> str:
     return "\n".join(f"  {p['similarity']:.3f}  {p['tag_a']} ↔ {p['tag_b']}" for p in pairs)
 
 
+def _decision_model_for(allowed_actions: tuple[str, ...]) -> type[BaseModel]:
+    """Build a DiagnosticDecision variant whose next_action Literal is restricted.
+
+    Hard structural constraint: LLM cannot return a blocked action.
+    'done' is always allowed.
+    """
+    choices = tuple(allowed_actions) + ("done",)
+    action_t = Literal[choices]  # type: ignore[valid-type]
+    return create_model(
+        "DiagnosticDecisionRestricted",
+        __base__=DiagnosticDecision,
+        next_action=(action_t, Field(description=f"FINAL: which workflow to run next, or done if vocab is healthy. Allowed: {', '.join(choices)}.")),
+    )
+
+
 def diagnose(
     vocab: list[dict],
     diagnostics: dict,
@@ -198,7 +215,11 @@ def diagnose(
 ) -> dict:
     settings = Settings()
     plan_model = _chat_model(settings).with_structured_output(PlanOutput)
-    decide_model = _chat_model(settings).with_structured_output(DiagnosticDecision)
+
+    blocked_set = set(blocked_actions or [])
+    allowed = tuple(a for a in ALL_ACTIONS if a not in blocked_set)
+    DecisionCls = _decision_model_for(allowed)
+    decide_model = _chat_model(settings).with_structured_output(DecisionCls)
 
     plan_prompt = ChatPromptTemplate.from_messages([("system", PLAN_SYSTEM), ("user", PLAN_USER)])
     decide_prompt = ChatPromptTemplate.from_messages([("system", DECIDE_SYSTEM), ("user", DECIDE_USER)])
@@ -247,7 +268,7 @@ def diagnose(
         "biases": plan.suspected_biases,
         "findings": findings_str,
     })
-    decision: DiagnosticDecision | None = decide_model.invoke(decide_msg)
+    decision: BaseModel | None = decide_model.invoke(decide_msg)
     if decision is None:
         decision = decide_model.invoke(decide_msg)
     if decision is None:
