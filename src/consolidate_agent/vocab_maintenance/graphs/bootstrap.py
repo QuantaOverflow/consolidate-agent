@@ -73,30 +73,34 @@ def _default_distill(records: list[dict], batch_size: int) -> list[dict]:
 
 
 def _default_synthesize(themes: list[dict]) -> dict:
-    """Real LLM synthesize: themes → {vocab, notes}.
+    """Real LLM synthesize via BERTopic-style clustering — embed → KMeans →
+    per-cluster LLM-name.
 
-    Uses qwen-max specifically (overrides Settings.qwen_model) because
-    qwen-plus's thinking-mode default makes single-shot synthesis on 500+
-    themes hit the 300s server-side timeout. qwen-max is faster on this
-    task and produces less-over-abstracted vocab.
+    See docs/adr/0001-bootstrap-synthesize-via-embedding-cluster.md for the
+    full rationale; in short, single-shot LLM synthesize at 500+ themes
+    over-abstracts to umbrella categories (validated repeatedly with both
+    qwen-plus and qwen-max). The cluster-first pipeline runs in ~80s and
+    produces ~50 specific tags with healthy size distribution.
+
+    `n_topics` defaults to len(themes) // 14, clamped to [5, 80] — i.e.
+    one tag per ~14 themes, the empirically observed Goldilocks ratio for
+    this corpus. For other corpora, adjust the divisor.
     """
-    from langchain_qwq import ChatQwen
     from consolidate_agent.config import Settings
+    from consolidate_agent.consolidation._utils import _chat_model
 
-    from ..bootstrap import synthesize_step
+    from ..bootstrap import synthesize_via_clustering
 
     settings = Settings()
     def model_factory():
-        return ChatQwen(
-            model="qwen-max",
-            api_key=settings.dashscope_api_key,
-            base_url=settings.dashscope_api_base,
-            temperature=0,
-            request_timeout=600,
-        )
+        return _chat_model(settings)  # qwen-plus + timeout 600 + thinking off
 
+    n_topics = max(5, min(80, len(themes) // 14))
     log_sink = _JsonlToLogger()
-    return synthesize_step(model_factory, themes, log_sink)
+    return synthesize_via_clustering(
+        model_factory, themes, log_sink,
+        n_topics=n_topics, concurrency=10,
+    )
 
 
 def _default_reverse_check(db_path: str, vocab: list[dict], concurrency: int) -> list[dict]:
