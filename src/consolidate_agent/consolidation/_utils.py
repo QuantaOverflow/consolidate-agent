@@ -98,6 +98,8 @@ def _chat_model(settings: Settings) -> ChatQwen:
         api_key=settings.dashscope_api_key,
         base_url=settings.dashscope_api_base,
         temperature=0,
+        request_timeout=600,  # default 300s truncates synthesize on ≥500 themes
+        enable_thinking=False,  # thinking mode over-abstracts vocab (9 tags vs 50)
     )
 
 
