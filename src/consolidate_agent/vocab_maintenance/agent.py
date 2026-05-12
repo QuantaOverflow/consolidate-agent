@@ -182,9 +182,16 @@ class Agent:
 
                 check_invariants(new_vocab, new_assignments)
 
-                # Verify (re-measure)
-                new_diag, new_assignments2 = self.measure_fn(new_vocab)
-                # use re-measured assignments (apply's in-memory ones are pre-LLM-revalidation)
+                # Post-apply diagnostics. measure_fn gets enough context to do
+                # incremental work: zero LLM for merge/deprecate (apply.py is
+                # deterministic), small-batch LLM for propose_new (re-check
+                # previously-missing records against the new tag).
+                new_diag, new_assignments2 = self.measure_fn(
+                    new_vocab,
+                    action=action,
+                    current_assignments=new_assignments,
+                    previous_assignments=state.assignments,
+                )
                 new_hit = _hit_rate(new_diag)
                 rec.hit_rate_after = new_hit
 

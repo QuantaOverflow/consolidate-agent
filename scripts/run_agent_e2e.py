@@ -18,20 +18,12 @@ import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
-from langchain_core.prompts import ChatPromptTemplate
-
-from consolidate_agent.config import Settings
-from consolidate_agent.consolidation._utils import _chat_model
 from consolidate_agent.vocab_maintenance.agent import Agent, FinalStatus
 from consolidate_agent.vocab_maintenance.diagnose import diagnose as diagnose_call
 from consolidate_agent.vocab_maintenance.measure import (
-    SYSTEM_PROMPT as RC_SYSTEM,
-    USER_PROMPT as RC_USER,
-    BatchAssignmentOutput,
-    _run_single_batch,
-    format_vocab,
-    format_records,
+    build_diagnostics,
     load_records,
+    reverse_check_subset,
 )
 from consolidate_agent.vocab_maintenance.propose.new import propose_new_fn
 from consolidate_agent.vocab_maintenance.propose.merge import propose_merge_fn
@@ -44,97 +36,67 @@ BASE = Path(__file__).resolve().parents[1]
 # ── Wiring ────────────────────────────────────────────────────────────────────
 
 
-def build_measure_fn(db_path: Path, sample_size: int, concurrency: int = 10):
-    """Wrap reverse_check as an in-memory measure_fn for the agent."""
-    import random as _r
-    settings = Settings()
-    records = load_records(db_path)
-    rng = _r.Random(42)
-    rng.shuffle(records)
-    sample = records[:sample_size] if sample_size > 0 else records
+def build_measure_fn(
+    db_path: Path,
+    cached_assignments_path: Path,
+    sample_size: int,
+    concurrency: int = 10,
+):
+    """Cache-driven measure_fn.
 
-    def measure_fn(vocab: list[dict]):
-        model = _chat_model(settings).with_structured_output(BatchAssignmentOutput)
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", RC_SYSTEM),
-            ("user", RC_USER),
-        ])
-        batch_size = 10
-        total_batches = (len(sample) + batch_size - 1) // batch_size
-        batches = []
-        for i in range(total_batches):
-            batches.append((i, sample[i * batch_size : (i + 1) * batch_size]))
+    Initial call (action=None): load cached assignments (no LLM).
+    After merge/deprecate apply: zero LLM — apply.py has already updated
+      assignments deterministically; we just re-aggregate diagnostics.
+    After propose_new apply: LLM patch only the records that were `missing`
+      in the previous round (the new tag may now cover them).
+    """
+    cached = json.loads(cached_assignments_path.read_text(encoding="utf-8"))
+    records_by_id = {r["record_id"]: r for r in load_records(db_path)}
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        results_by_idx: dict[int, list[dict]] = {}
-        with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            futures = {ex.submit(_run_single_batch, idx, recs, model, prompt, vocab, total_batches): idx
-                       for idx, recs in batches}
-            for fut in as_completed(futures):
-                idx, batch_out, _ = fut.result()
-                results_by_idx[idx] = batch_out
+    # Sample cap: deterministic slice (sorted by record_id) so reruns are stable
+    if sample_size > 0 and sample_size < len(cached):
+        cached = sorted(cached, key=lambda a: a["record_id"])[:sample_size]
+    print(f"  [measure] loaded {len(cached)} cached assignments", flush=True)
 
-        assignments = [r for i in sorted(results_by_idx) for r in results_by_idx[i]]
-        # Filter LLM-invented fake tags (not in vocab)
-        # This is necessary because reverse_check's LLM occasionally outputs
-        # tag names outside the provided vocabulary (~3% empirically).
-        # Without this, check_invariants fails on dangling references.
+    def _patch_missing_with_new_vocab(vocab, previous_assignments, current_assignments):
+        """For propose_new: re-LLM the records that were `missing` last round."""
+        prev_missing_ids = {a["record_id"] for a in previous_assignments if a.get("missing")}
+        if not prev_missing_ids:
+            return current_assignments
+        to_check = [records_by_id[rid] for rid in prev_missing_ids if rid in records_by_id]
+        print(f"  [measure] propose_new patch: re-checking {len(to_check)} previously-missing records", flush=True)
+        delta = reverse_check_subset(to_check, vocab, batch_size=10, concurrency=concurrency)
+        # Filter vocab-external fake tags (LLM hallucination guard)
         vocab_names = {t["name"] for t in vocab}
-        fake_filtered = 0
-        for a in assignments:
+        for a in delta:
             original = a.get("selected_tags", []) or []
             filtered = [t for t in original if t["name"] in vocab_names]
-            if len(filtered) < len(original):
-                fake_filtered += len(original) - len(filtered)
             a["selected_tags"] = filtered
-            # if no tags left → mark as missing
             if not filtered and not a.get("missing"):
                 a["missing"] = True
                 a["missing_concept"] = a.get("missing_concept") or "all selected_tags were vocab-external"
-            elif a.get("missing") and not filtered:
-                # keep missing=True, just ensured selected_tags=[]
-                pass
-        if fake_filtered:
-            print(f"  [measure] filtered {fake_filtered} vocab-external fake tags", flush=True)
-        diag = _build_diag(vocab, assignments)
-        return diag, assignments
+        delta_by_id = {a["record_id"]: a for a in delta}
+        return [delta_by_id.get(a["record_id"], a) for a in current_assignments]
+
+    def measure_fn(vocab: list[dict], **ctx):
+        action = ctx.get("action")
+        current_assignments = ctx.get("current_assignments")
+        previous_assignments = ctx.get("previous_assignments")
+
+        if action is None:
+            # Initial call: use cache as the assignment snapshot.
+            assignments = [dict(a) for a in cached]
+        elif action == "propose_new":
+            assignments = _patch_missing_with_new_vocab(
+                vocab, previous_assignments or [], list(current_assignments or [])
+            )
+        else:
+            # merge / deprecate / others: apply.py already updated assignments
+            assignments = list(current_assignments or [])
+
+        return build_diagnostics(vocab, assignments), assignments
 
     return measure_fn
-
-
-def _build_diag(vocab: list[dict], assignments: list[dict]) -> dict:
-    from collections import Counter, defaultdict
-    tag_usage: Counter[str] = Counter()
-    cooccur: Counter[tuple[str, str]] = Counter()
-    missing_records: list[dict] = []
-    boundary_blur: list[dict] = []
-
-    for a in assignments:
-        if a.get("missing"):
-            missing_records.append({"record_id": a["record_id"], "title": a.get("title", ""), "missing_concept": a.get("missing_concept", "")})
-            continue
-        tags = a.get("selected_tags", [])
-        for t in tags:
-            tag_usage[t["name"]] += 1
-        names = [t["name"] for t in tags]
-        for i in range(len(names)):
-            for j in range(i + 1, len(names)):
-                cooccur[tuple(sorted([names[i], names[j]]))] += 1
-        confs = [t.get("confidence", "") for t in tags]
-        if len(confs) >= 2 and len(set(confs)) == 1:
-            boundary_blur.append({"record_id": a["record_id"], "title": a.get("title", "")})
-
-    return {
-        "sample_size": len(assignments),
-        "total_assigned": sum(1 for a in assignments if not a.get("missing")),
-        "total_missing": len(missing_records),
-        "tag_usage_count": dict(tag_usage.most_common()),
-        "unused_tags": sorted({t["name"] for t in vocab} - set(tag_usage)),
-        "missing_records": missing_records,
-        "boundary_blur_records": boundary_blur,
-        "low_confidence_records": [],
-        "top_cooccurrence_pairs": [{"pair": list(p), "count": c} for p, c in cooccur.most_common(15)],
-    }
 
 
 def diagnose_fn(vocab, diagnostics, assignments, **kwargs):
@@ -170,9 +132,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--vocab", default="outputs/tag_extraction_v2_vocab_v1.1.json", type=Path)
     parser.add_argument("--db", default="outputs/knowledge.db", type=Path)
+    parser.add_argument(
+        "--cached-assignments",
+        default="outputs/full_assignment/reverse_check_assignments.json",
+        type=Path,
+        help="prior full reverse_check output — used as initial assignment snapshot",
+    )
     parser.add_argument("--output-dir", default="outputs/agent_e2e", type=Path)
     parser.add_argument("--max-iter", default=3, type=int)
-    parser.add_argument("--sample-size", default=200, type=int, help="reverse_check sample (200 = ~30s/measure)")
+    parser.add_argument("--sample-size", default=0, type=int, help="cap on cached records (0 = use all)")
     parser.add_argument("--concurrency", default=10, type=int)
     args = parser.parse_args()
 
@@ -181,11 +149,11 @@ def main():
 
     print(f"=== Agent E2E ===")
     print(f"  vocab: {args.vocab.name} ({len(initial_vocab)} tags)")
-    print(f"  sample_size: {args.sample_size}  concurrency: {args.concurrency}")
+    print(f"  cache: {args.cached_assignments.name}  sample_cap: {args.sample_size or 'full'}  concurrency: {args.concurrency}")
     print(f"  max_iter: {args.max_iter}")
     print()
 
-    measure_fn = build_measure_fn(args.db, args.sample_size, args.concurrency)
+    measure_fn = build_measure_fn(args.db, args.cached_assignments, args.sample_size, args.concurrency)
     propose_fns = build_propose_fns(args.db)
 
     agent = Agent(

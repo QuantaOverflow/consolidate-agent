@@ -148,6 +148,79 @@ def _run_single_batch(
     return batch_idx, out, elapsed
 
 
+def build_diagnostics(vocab: list[dict], assignments: list[dict]) -> dict:
+    """Pure local aggregation of assignments → diagnostics. No LLM."""
+    tag_usage: Counter[str] = Counter()
+    cooccur: Counter[tuple[str, str]] = Counter()
+    missing_records: list[dict] = []
+    boundary_blur: list[dict] = []
+
+    for a in assignments:
+        if a.get("missing"):
+            missing_records.append({
+                "record_id": a["record_id"],
+                "title": a.get("title", ""),
+                "missing_concept": a.get("missing_concept", ""),
+            })
+            continue
+        tags = a.get("selected_tags", [])
+        for t in tags:
+            tag_usage[t["name"]] += 1
+        names = [t["name"] for t in tags]
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                cooccur[tuple(sorted([names[i], names[j]]))] += 1
+        confs = [t.get("confidence", "") for t in tags]
+        if len(confs) >= 2 and len(set(confs)) == 1:
+            boundary_blur.append({"record_id": a["record_id"], "title": a.get("title", "")})
+
+    return {
+        "sample_size": len(assignments),
+        "total_assigned": sum(1 for a in assignments if not a.get("missing")),
+        "total_missing": len(missing_records),
+        "tag_usage_count": dict(tag_usage.most_common()),
+        "unused_tags": sorted({t["name"] for t in vocab} - set(tag_usage)),
+        "missing_records": missing_records,
+        "boundary_blur_records": boundary_blur,
+        "low_confidence_records": [],
+        "top_cooccurrence_pairs": [{"pair": list(p), "count": c} for p, c in cooccur.most_common(15)],
+    }
+
+
+def reverse_check_subset(
+    records: list[dict],
+    vocab: list[dict],
+    batch_size: int = 10,
+    concurrency: int = 10,
+) -> list[dict]:
+    """Run LLM reverse_check on a record subset. Returns assignments list.
+
+    Useful for incrementally re-checking a small group (e.g. previously-missing
+    records after propose_new added new tag).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if not records:
+        return []
+
+    settings = Settings()
+    model = _chat_model(settings).with_structured_output(BatchAssignmentOutput)
+    prompt = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT), ("user", USER_PROMPT)])
+
+    total_batches = (len(records) + batch_size - 1) // batch_size
+    batches = [(i, records[i * batch_size : (i + 1) * batch_size]) for i in range(total_batches)]
+
+    results_by_idx: dict[int, list[dict]] = {}
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        futures = {ex.submit(_run_single_batch, idx, recs, model, prompt, vocab, total_batches): idx
+                   for idx, recs in batches}
+        for fut in as_completed(futures):
+            idx, batch_out, _ = fut.result()
+            results_by_idx[idx] = batch_out
+
+    return [r for i in sorted(results_by_idx) for r in results_by_idx[i]]
+
+
 def run(
     db_path: Path,
     vocab_path: Path,

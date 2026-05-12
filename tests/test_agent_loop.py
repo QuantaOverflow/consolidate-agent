@@ -83,7 +83,7 @@ def make_measure_fn(post_apply_diag_overrides: list[dict] | None = None):
     call_count = {"i": 0}
     overrides = list(post_apply_diag_overrides or [])
 
-    def measure_fn(vocab):
+    def measure_fn(vocab, **ctx):
         # Use a default assignments inferred from vocab (simplistic — caller sets via mock)
         assignments = make_measure_fn._next_assignments.get(id(vocab), [])
         diag = mk_diagnostics(assignments, vocab)
@@ -98,7 +98,7 @@ def make_measure_fn(post_apply_diag_overrides: list[dict] | None = None):
 
 def make_constant_measure(diag: dict, assignments: list[dict]):
     """Simpler: always return same diag + assignments."""
-    def measure_fn(vocab):
+    def measure_fn(vocab, **ctx):
         d = dict(diag)
         # adapt to vocab (unused_tags depends on vocab)
         from collections import Counter
@@ -284,7 +284,7 @@ def test_u5_hit_rate_regression_rollback():
     diag_after = mk_diagnostics(assignments_after, vocab)
 
     call_count = {"i": 0}
-    def measure_fn(vocab):
+    def measure_fn(vocab, **ctx):
         call_count["i"] += 1
         if call_count["i"] == 1:
             return diag_initial, [dict(a, selected_tags=list(a["selected_tags"])) for a in assignments]
