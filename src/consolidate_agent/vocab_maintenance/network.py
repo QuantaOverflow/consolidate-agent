@@ -504,14 +504,32 @@ def _default_propose_new(db_path: Path | None, themes_cache: dict[str, str] | No
 
 
 def _default_records_fetcher(db_path: Path | None) -> Callable[[list[str]], list[dict]]:
-    """Build a record fetcher that loads raw records from db by record_id."""
+    """Build a record fetcher that loads raw records from db by record_id.
+
+    Uses `WHERE record_id IN (?, ...)` so cost is O(K) where K = #ids,
+    not O(N) full-table scan.
+    """
     if db_path is None:
         raise ValueError("db_path required when records_fetcher not provided")
 
     def fetch(record_ids: list[str]) -> list[dict]:
-        from .measure import load_records
-        all_records = load_records(db_path)
-        by_id = {r["record_id"]: r for r in all_records}
-        return [by_id[rid] for rid in record_ids if rid in by_id]
+        if not record_ids:
+            return []
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.row_factory = sqlite3.Row
+            placeholders = ",".join("?" * len(record_ids))
+            rows = conn.execute(
+                f"SELECT record_id, title, insight FROM source_knowledge_records "
+                f"WHERE record_id IN ({placeholders})",
+                record_ids,
+            ).fetchall()
+        finally:
+            conn.close()
+        return [
+            {"record_id": r["record_id"], "title": r["title"], "insight": r["insight"]}
+            for r in rows
+        ]
 
     return fetch
