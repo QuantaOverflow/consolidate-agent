@@ -105,11 +105,8 @@ Blocked actions are not in your decision schema this round; you can only choose 
 
 DECIDE_SYSTEM = """You are now deciding the next action based on probe findings.
 
-Decision rules:
-- propose_new: only if probes confirm genuine missing concepts (not LLM false positives)
-- propose_merge: only if probes confirm two tags describe the same concept (subsumption, not just relatedness)
-- propose_deprecate: if a tag is truly unused or its records all fit a single other tag better
-- done: if probes show the vocab is in good shape
+Decision rules (ONLY these actions are available this round):
+{decision_rules}
 
 Work through analysis steps IN ORDER. Pydantic fields are listed in thinking order — fill them sequentially.
 
@@ -159,7 +156,31 @@ DECIDE_USER = """## Original raw signals
 ## Probe findings
 {findings}
 
+## ⚠️ BLOCKED actions for this round (DO NOT pick — your output will be rejected)
+{blocked_actions}
+
+You MUST choose `next_action` from: {allowed_actions}
+
 Decide the next action with probe-backed reasoning."""
+
+
+# Per-action rule descriptions — assembled dynamically based on allowed_actions.
+_DECIDE_RULES = {
+    "propose_new": "- propose_new: only if probes confirm genuine missing concepts (not LLM false positives)",
+    "propose_merge": "- propose_merge: only if probes confirm two tags describe the same concept (subsumption, not just relatedness)",
+    "propose_deprecate": "- propose_deprecate: if a tag is truly unused or its records all fit a single other tag better",
+    "done": "- done: if probes show the vocab is in good shape",
+}
+
+
+def _build_decision_rules(allowed_actions: tuple[str, ...]) -> str:
+    """Render only the rules for actions that are currently allowed.
+
+    Blocked actions are entirely absent from the prompt — LLM never sees
+    them as candidates.
+    """
+    keys = list(allowed_actions) + ["done"]
+    return "\n".join(_DECIDE_RULES[k] for k in keys if k in _DECIDE_RULES)
 
 
 # ── Pipeline ─────────────────────────────────────────────────────────────────
@@ -266,12 +287,18 @@ def diagnose(
             findings[probe_call] = {"error": str(e)}
             logger.event("probe.error", call=probe_call, error=str(e)[:200])
 
-    # Step 3: decide
+    # Step 3: decide — inject blocked/allowed info so LLM doesn't keep
+    # picking blocked actions and getting ValidationError.
     findings_str = json.dumps(findings, indent=2, ensure_ascii=False)[:6000]  # cap
+    allowed_for_decide = tuple(allowed) + ("done",)
+    blocked_for_decide = ", ".join(blocked_set) if blocked_set else "(none)"
     decide_msg = decide_prompt.invoke({
         "raw_signals": plan.raw_signals_observed,
         "biases": plan.suspected_biases,
         "findings": findings_str,
+        "decision_rules": _build_decision_rules(allowed),
+        "blocked_actions": blocked_for_decide,
+        "allowed_actions": ", ".join(allowed_for_decide),
     })
     decision = invoke_with_retry(
         decide_model, decide_msg, retries=3, caller="diagnose.decide", logger=logger,
