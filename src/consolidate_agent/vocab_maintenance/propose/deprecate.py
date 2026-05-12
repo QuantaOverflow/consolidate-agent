@@ -158,9 +158,7 @@ def propose_deprecate_fn(
 
     Returns list of DeprecateProposal (or MergeProposal if LLM says merge_to).
     """
-    import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).resolve().parent / "agent"))
-    from apply import DeprecateProposal as _DeprecateProposal, MergeProposal as _MergeProposal
+    from ..apply import DeprecateProposal as _DeprecateProposal, MergeProposal as _MergeProposal
 
     settings = Settings()
     model = _chat_model(settings).with_structured_output(DeprecateJudgement)

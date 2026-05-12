@@ -1,14 +1,13 @@
 """End-to-end agent runner with real LLM workflows.
 
-Wires together:
-  - reverse_check_vocab.py (measure_fn) — parallel 10
-  - diagnose.py (diagnose_fn)
-  - propose_new_tags.propose_new_fn / propose_merge.propose_merge_fn /
-    propose_deprecate.propose_deprecate_fn (propose_fns)
-  - apply.apply_proposal (in agent.py)
+Wires together vocab_maintenance package components:
+  - measure (reverse_check) — parallel 10
+  - diagnose (probe-driven reviewer)
+  - propose.new / propose.merge / propose.deprecate
+  - apply_proposal (invariant-checked)
 
 Usage:
-    uv run python scripts/agent/run_agent_e2e.py [--max-iter N] [--sample-size N]
+    uv run python scripts/run_agent_e2e.py [--max-iter N] [--sample-size N]
 """
 from __future__ import annotations
 
@@ -19,15 +18,13 @@ import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
-# Path setup so imports work
-BASE = Path(__file__).resolve().parents[2]
-SCRIPTS = BASE / "scripts"
-sys.path.insert(0, str(SCRIPTS / "agent"))
-sys.path.insert(0, str(SCRIPTS))
+from langchain_core.prompts import ChatPromptTemplate
 
-from agent import Agent, FinalStatus  # noqa: E402
-from diagnose import diagnose as diagnose_call  # noqa: E402
-from reverse_check_vocab import (  # noqa: E402
+from consolidate_agent.config import Settings
+from consolidate_agent.consolidation._utils import _chat_model
+from consolidate_agent.vocab_maintenance.agent import Agent, FinalStatus
+from consolidate_agent.vocab_maintenance.diagnose import diagnose as diagnose_call
+from consolidate_agent.vocab_maintenance.measure import (
     SYSTEM_PROMPT as RC_SYSTEM,
     USER_PROMPT as RC_USER,
     BatchAssignmentOutput,
@@ -36,13 +33,12 @@ from reverse_check_vocab import (  # noqa: E402
     format_records,
     load_records,
 )
-from propose_new_tags import propose_new_fn  # noqa: E402
-from propose_merge import propose_merge_fn  # noqa: E402
-from propose_deprecate import propose_deprecate_fn  # noqa: E402
+from consolidate_agent.vocab_maintenance.propose.new import propose_new_fn
+from consolidate_agent.vocab_maintenance.propose.merge import propose_merge_fn
+from consolidate_agent.vocab_maintenance.propose.deprecate import propose_deprecate_fn
 
-from langchain_core.prompts import ChatPromptTemplate
-from consolidate_agent.config import Settings
-from consolidate_agent.consolidation._utils import _chat_model
+
+BASE = Path(__file__).resolve().parents[1]
 
 
 # ── Wiring ────────────────────────────────────────────────────────────────────

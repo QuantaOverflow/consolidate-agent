@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable
 
-from apply import (
+from .apply import (
     DeprecateProposal,
     InvalidProposal,
     MergeProposal,

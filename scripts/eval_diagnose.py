@@ -7,12 +7,11 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-from diagnose import diagnose  # noqa: E402
-from vocab_similarity import find_similar_pairs  # noqa: E402
+from consolidate_agent.vocab_maintenance.diagnose import diagnose
+from consolidate_agent.vocab_maintenance.similarity import find_similar_pairs
 
 
-BASE = Path(__file__).resolve().parents[2]
+BASE = Path(__file__).resolve().parents[1]
 FIXTURES = BASE / "tests/fixtures"
 DB = BASE / "outputs/knowledge.db"
 

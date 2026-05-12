@@ -25,9 +25,8 @@ from pydantic import BaseModel, Field
 from consolidate_agent.config import Settings
 from consolidate_agent.consolidation._utils import _chat_model
 
-# Reuse distill from extract_tag_vocab_v2
-sys.path.insert(0, str(Path(__file__).parent))
-from extract_tag_vocab_v2 import (  # noqa: E402
+# Reuse distill primitives from bootstrap pipeline
+from ..bootstrap import (
     DISTILL_SYSTEM,
     DISTILL_USER,
     DistillBatchOutput,
@@ -186,9 +185,7 @@ def propose_new_fn(
     Pipeline: missing records → distill → synthesize-with-vocab → NewTagProposal list.
     focus is appended to synthesize prompt to guide candidate generation.
     """
-    import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).resolve().parent / "agent"))
-    from apply import NewTagProposal as _NewTagProposal
+    from ..apply import NewTagProposal as _NewTagProposal
 
     settings = Settings()
     def model_factory():

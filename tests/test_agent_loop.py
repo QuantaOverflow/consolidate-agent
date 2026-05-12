@@ -26,10 +26,8 @@ import sys
 import traceback
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts/agent"))
-
-from agent import ACTIONS, Agent, FinalStatus  # noqa: E402
-from apply import (  # noqa: E402
+from consolidate_agent.vocab_maintenance.agent import ACTIONS, Agent, FinalStatus
+from consolidate_agent.vocab_maintenance.apply import (
     DeprecateProposal,
     MergeProposal,
     NewTagProposal,
@@ -118,12 +116,15 @@ def make_diagnose_seq(decisions: list[dict]):
     """Returns diagnose_fn that yields decisions in order; last one repeats."""
     it = iter(decisions)
     last = [None]
-    def diagnose_fn(vocab, diag, assign):
+    captured_blocked = []
+    def diagnose_fn(vocab, diag, assign, **kwargs):
+        captured_blocked.append(kwargs.get("blocked_actions"))
         try:
             last[0] = next(it)
         except StopIteration:
             pass
         return {"decision": last[0]}
+    diagnose_fn._captured_blocked = captured_blocked
     return diagnose_fn
 
 

@@ -17,8 +17,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from consolidate_agent.config import Settings
 from consolidate_agent.consolidation._utils import _chat_model
 
-sys.path.insert(0, str(Path(__file__).parent))
-from propose_merge import (  # noqa: E402
+from consolidate_agent.vocab_maintenance.propose.merge import (
     MergeJudgement,
     SYSTEM_PROMPT as MERGE_SYSTEM,
     USER_PROMPT as MERGE_USER,
@@ -27,7 +26,7 @@ from propose_merge import (  # noqa: E402
     format_evidence,
     judge_pair,
 )
-from propose_deprecate import (  # noqa: E402
+from consolidate_agent.vocab_maintenance.propose.deprecate import (
     DeprecateJudgement,
     SYSTEM_PROMPT as DEPRECATE_SYSTEM,
     USER_PROMPT as DEPRECATE_USER,

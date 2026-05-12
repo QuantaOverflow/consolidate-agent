@@ -153,13 +153,11 @@ def propose_merge_fn(
 ):
     """In-memory propose_merge for agent loop.
 
-    Returns list of MergeProposal objects (from scripts/agent/apply.py).
+    Returns list of MergeProposal objects (from vocab_maintenance.apply).
     focus is currently advisory — embedded in prompt for context but doesn't
     change candidate selection.
     """
-    import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).resolve().parent / "agent"))
-    from apply import MergeProposal as _MergeProposal
+    from ..apply import MergeProposal as _MergeProposal
 
     settings = Settings()
     model = _chat_model(settings).with_structured_output(MergeJudgement)

@@ -17,10 +17,8 @@ from pydantic import BaseModel, Field
 from consolidate_agent.config import Settings
 from consolidate_agent.consolidation._utils import _chat_model
 
-import sys
-sys.path.insert(0, str(Path(__file__).parent))
-from probes import run_probe  # noqa: E402
-from vocab_similarity import find_similar_pairs  # noqa: E402
+from .probes import run_probe
+from .similarity import find_similar_pairs
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
