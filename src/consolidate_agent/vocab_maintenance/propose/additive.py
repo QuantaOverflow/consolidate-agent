@@ -62,9 +62,56 @@ Criteria for `applies=false`:
   - The new tag overlaps too much with the record's existing tags
   - The record's lesson is tangential to the new tag's concept
   - The match is generic/weak rather than substantive
+  - Record and tag share a keyword but the underlying MECHANISM differs
+    (see common confusions below)
 
 Prefer false when uncertain. Conservative is better — adding noisy tags hurts
-downstream search precision."""
+downstream search precision.
+
+⚠ COMMON KEYWORD CONFUSIONS to avoid (NOT applies=true just because words match):
+
+  "token" appears in many unrelated contexts:
+    - LLM output tokens (max_tokens, generation)
+    - OAuth/JWT auth tokens (refresh, rotation)
+    - Cryptographic tokens (signing, encryption)
+    → If record's "token" mechanism ≠ tag's "token" mechanism, applies=false.
+
+  "limit" / "cap" appears in:
+    - API rate limits (request throughput, 429 responses)
+    - LLM token caps (max_tokens, output truncation)
+    - Memory caps, connection pool sizes, timeout values
+    → Distinguish request-throttling from output-truncation from resource-sizing.
+
+  "session" appears in:
+    - Web/auth sessions (cookies, login state)
+    - Shell/tmux sessions (terminal multiplexers)
+    - Training sessions (ML runs), Codex sessions (LLM conversations)
+
+  "rotation" appears in:
+    - OAuth refresh token rotation (auth)
+    - Cryptographic key rotation (encryption)
+    - Log rotation (filesystem), role rotation (org)
+
+  "timeout" appears in:
+    - HTTP request timeouts (network)
+    - asyncio task timeouts (concurrency)
+    - Cache TTL (storage)
+
+Worked examples:
+
+  Record: "Output token cap truncates JSON mid-string when max_tokens is exhausted"
+  Tag: rate_limiting (def: API request quotas, token bucket, throttling)
+  → applies=false. Both have "token/cap/limit" but record is LLM generation
+    side, tag is API request side. Different mechanisms entirely.
+
+  Record: "OAuth refresh token rotation strategy"
+  Tag: cryptographic_key_rotation (def: rotating signing/encryption keys)
+  → applies=false. Both have "rotation/token" but OAuth tokens are session
+    artifacts, not cryptographic keys.
+
+  Record: "OAuth refresh token rotation strategy"
+  Tag: authentication (def: identity verification including OAuth, session lifecycle)
+  → applies=true. Tag definition explicitly includes OAuth + session lifecycle."""
 
 
 ADDITIVE_USER = """## New tag
