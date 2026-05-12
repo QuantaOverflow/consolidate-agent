@@ -118,6 +118,7 @@ def synthesize_with_vocab(model_factory, themes: list[dict], vocab: list[dict]) 
 
     theme_texts = [t["theme"] for t in themes]
 
+    from ..observability import invoke_with_retry
     t0 = time.perf_counter()
     messages = syn_prompt.invoke({
         "vocab_count": len(vocab),
@@ -125,13 +126,13 @@ def synthesize_with_vocab(model_factory, themes: list[dict], vocab: list[dict]) 
         "theme_count": len(theme_texts),
         "themes": format_themes(theme_texts),
     })
-    result = syn_model.invoke(messages)
+    result = invoke_with_retry(syn_model, messages, retries=3, caller="propose_new.synthesize")
     elapsed = time.perf_counter() - t0
 
     print(f"  synthesize  themes={len(theme_texts)}  →  new_tags={len(result.new_tags) if result else 0}  ({elapsed:.1f}s)", flush=True)
 
     if result is None:
-        raise ValueError("synthesize returned None")
+        raise ValueError("synthesize returned None after 3 retries")
     return result
 
 
@@ -213,9 +214,8 @@ def propose_new_fn(
         "theme_count": len(theme_texts),
         "themes": format_themes(theme_texts),
     })
-    result = syn_model.invoke(messages)
-    if result is None:
-        result = syn_model.invoke(messages)  # retry
+    from ..observability import invoke_with_retry
+    result = invoke_with_retry(syn_model, messages, retries=3, caller="propose_new_fn.synthesize")
     if result is None:
         return []
 

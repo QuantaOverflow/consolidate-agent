@@ -75,31 +75,41 @@ def main():
             thread_id=args.thread_id,
             checkpoint_db=args.checkpoint_db,
         )
+        elapsed = time.perf_counter() - t0
+        network.save(args.network_out)
+
+        print(f"\n{'='*60}\n=== Done ({elapsed:.1f}s = {elapsed/60:.1f} min) ===\n{'='*60}")
+        print(f"  vocab:       {len(network.vocab)} tags")
+        print(f"  assignments: {len(network.assignments)} records")
+        print(f"  hit_rate:    {network.hit_rate():.3f}")
+        print(f"  thread_id:   {network.metadata.get('bootstrap_thread_id')}")
+        print(f"  attempts:    {network.metadata.get('synthesize_attempts', 1)} (synthesize)")
+        print(f"  network →    {args.network_out}")
+
+        run_logger.event("run.done", elapsed_s=round(elapsed, 1),
+                         vocab_size=len(network.vocab),
+                         assignments=len(network.assignments),
+                         hit_rate=round(network.hit_rate(), 4))
+        return 0
     except ValueError as e:
         if "aborted" in str(e):
             print(f"\n  bootstrap aborted by user.")
-            run_logger.event("run.aborted", reason=str(e))
-            run_logger.close()
+            run_logger.event("run.aborted", reason=str(e),
+                             elapsed_s=round(time.perf_counter() - t0, 1))
             return 1
         raise
-
-    elapsed = time.perf_counter() - t0
-    network.save(args.network_out)
-
-    print(f"\n{'='*60}\n=== Done ({elapsed:.1f}s = {elapsed/60:.1f} min) ===\n{'='*60}")
-    print(f"  vocab:       {len(network.vocab)} tags")
-    print(f"  assignments: {len(network.assignments)} records")
-    print(f"  hit_rate:    {network.hit_rate():.3f}")
-    print(f"  thread_id:   {network.metadata.get('bootstrap_thread_id')}")
-    print(f"  attempts:    {network.metadata.get('synthesize_attempts', 1)} (synthesize)")
-    print(f"  network →    {args.network_out}")
-
-    run_logger.event("run.done", elapsed_s=round(elapsed, 1),
-                     vocab_size=len(network.vocab),
-                     assignments=len(network.assignments),
-                     hit_rate=round(network.hit_rate(), 4))
-    run_logger.close()
-    return 0
+    except Exception as e:  # noqa: BLE001 — top-level audit; re-raised below
+        import traceback
+        run_logger.event(
+            "run.error",
+            elapsed_s=round(time.perf_counter() - t0, 1),
+            error_type=type(e).__name__,
+            error=str(e)[:500],
+            traceback=traceback.format_exc()[:3000],
+        )
+        raise
+    finally:
+        run_logger.close()
 
 
 if __name__ == "__main__":

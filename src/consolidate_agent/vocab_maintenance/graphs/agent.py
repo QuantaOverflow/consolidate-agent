@@ -47,6 +47,7 @@ from ..apply import (
     apply_proposal,
     check_invariants,
 )
+from ..network import emit_apply_event
 from ..observability import get_default_logger
 from .state import AgentLoopState
 
@@ -210,10 +211,22 @@ def build_agent_graph(
         successes: list = []
         failures: list[tuple[Any, Exception]] = []
 
+        run_id = state.get("run_id", "")
+        action = state.get("action", "")
+        actor = f"agent:{action}" if action else "agent"
+        reasoning = (state.get("decision") or {}).get("reasoning", "") or ""
+
         for p in state["proposals"]:
+            before_vocab = list(cur_vocab)
+            before_assignments = list(cur_assignments)
             try:
                 cur_vocab, cur_assignments = apply_proposal(cur_vocab, cur_assignments, p)
                 successes.append(p)
+                emit_apply_event(
+                    before_vocab, before_assignments,
+                    cur_vocab, cur_assignments,
+                    p, actor=actor, run_id=run_id, reasoning=reasoning,
+                )
             except (InvalidProposal, OrphanError) as e:
                 failures.append((p, e))
                 logger.event("apply.proposal_skipped",

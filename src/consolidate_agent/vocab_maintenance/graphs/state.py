@@ -55,6 +55,7 @@ class AgentLoopState(TypedDict, total=False):
     max_iter: int
     hit_rate_regression_threshold: float
     disabled_actions: list
+    run_id: str                          # = thread_id; used as audit run grouping key
 
     # Loop state
     iter: int

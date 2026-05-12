@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from consolidate_agent.config import Settings
 from consolidate_agent.consolidation._utils import _chat_model
 
+from ..network import emit_network_event
 from ..observability import get_default_logger, invoke_with_retry
 from ..similarity import find_records_similar_to_tag
 
@@ -135,6 +136,8 @@ def expand_new_tag_coverage(
     similarity_threshold: float = 0.6,
     top_n: int = 30,
     default_confidence: str = "medium",
+    actor: str = "ingest:expand",
+    run_id: str = "",
 ) -> dict[str, int]:
     """For each new tag, find additionally-applicable records via embedding + LLM.
 
@@ -195,6 +198,12 @@ def expand_new_tag_coverage(
             additions_by_tag[tag_name] = 0
             continue
 
+        # Snapshot for audit-event diff (in-place mutation below)
+        before_assignments = [
+            {**a, "selected_tags": list(a.get("selected_tags") or [])}
+            for a in network.assignments
+        ]
+
         # Step 3: append tag to "yes" records
         yes_count = 0
         for decision in result.decisions:
@@ -223,5 +232,21 @@ def expand_new_tag_coverage(
             added=yes_count,
             skipped_no=len(candidates) - yes_count,
         )
+
+        if yes_count > 0:
+            emit_network_event(
+                "expand_coverage",
+                {
+                    "new_tag": tag_name,
+                    "candidates": len(candidates),
+                    "added_count": yes_count,
+                    "similarity_threshold": similarity_threshold,
+                },
+                [tag_name],
+                network.vocab, before_assignments,
+                network.vocab, network.assignments,
+                actor=actor, run_id=run_id,
+                reasoning=f"additive coverage: {tag_name} → {yes_count} records (LLM yes/{len(candidates)} candidates)",
+            )
 
     return additions_by_tag

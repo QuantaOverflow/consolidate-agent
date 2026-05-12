@@ -9,10 +9,14 @@ Also: `ingest_batch` for streaming new record batches (growth path),
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import io
 import json
+import os
+import shutil
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -41,6 +45,131 @@ def _vocab_hash(vocab: list[dict]) -> str:
         ensure_ascii=False,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def emit_network_event(
+    op_type: str,
+    payload: dict,
+    affected_tags: list[str],
+    before_vocab: list[dict],
+    before_assignments: list[dict],
+    after_vocab: list[dict],
+    after_assignments: list[dict],
+    *,
+    actor: str,
+    run_id: str = "",
+    reasoning: str = "",
+) -> None:
+    """Core audit event emitter. All mutation paths funnel here.
+
+    Computes affected_records by diffing per-record tag sets (O(N)).
+    Truncates affected_records at 50 in the event payload to keep jsonl
+    line size bounded; affected_records_count is the true total.
+
+    `op_type` taxonomy:
+      - apply_new_tag / apply_merge / apply_deprecate — proposal-driven
+      - expand_coverage  — additive tag attachment to existing records
+      - repool_recheck   — pool re-classified after vocab grew
+      - bootstrap_init   — initial network construction
+    """
+    before_tags_by_id: dict[str, frozenset[str]] = {
+        a["record_id"]: frozenset(t["name"] for t in (a.get("selected_tags") or []))
+        for a in before_assignments
+    }
+    after_tags_by_id: dict[str, frozenset[str]] = {
+        a["record_id"]: frozenset(t["name"] for t in (a.get("selected_tags") or []))
+        for a in after_assignments
+    }
+    affected = sorted(
+        rid for rid in (before_tags_by_id.keys() | after_tags_by_id.keys())
+        if before_tags_by_id.get(rid) != after_tags_by_id.get(rid)
+    )
+    before_missing = sum(1 for a in before_assignments if a.get("missing"))
+    after_missing = sum(1 for a in after_assignments if a.get("missing"))
+
+    get_default_logger().event(
+        "network.apply",
+        actor=actor,
+        run_id=run_id,
+        op_type=op_type,
+        proposal=payload,
+        reasoning=reasoning[:500] if reasoning else "",
+        affected_tags=affected_tags,
+        affected_records=affected[:50],
+        affected_records_count=len(affected),
+        state_hash_before=_vocab_hash(before_vocab),
+        state_hash_after=_vocab_hash(after_vocab),
+        vocab_size_before=len(before_vocab),
+        vocab_size_after=len(after_vocab),
+        missing_before=before_missing,
+        missing_after=after_missing,
+    )
+
+
+def emit_apply_event(
+    before_vocab: list[dict],
+    before_assignments: list[dict],
+    after_vocab: list[dict],
+    after_assignments: list[dict],
+    proposal: Any,
+    *,
+    actor: str,
+    run_id: str = "",
+    reasoning: str = "",
+) -> None:
+    """Emit an audit event for a single committed proposal.
+
+    Wrapper around `emit_network_event` that derives op_type/payload/
+    affected_tags from the proposal type.
+    """
+    op_type, affected_tags, payload = _describe_proposal(proposal)
+    emit_network_event(
+        op_type, payload, affected_tags,
+        before_vocab, before_assignments,
+        after_vocab, after_assignments,
+        actor=actor, run_id=run_id, reasoning=reasoning,
+    )
+
+
+def _describe_proposal(proposal: Any) -> tuple[str, list[str], dict]:
+    """Returns (op_type, affected_tag_names, json-safe payload).
+
+    Centralizes the proposal → audit-event mapping so apply() doesn't
+    branch on type names everywhere.
+    """
+    cls_name = type(proposal).__name__
+    if cls_name == "NewTagProposal":
+        return "apply_new_tag", [proposal.name], {
+            "name": proposal.name,
+            "definition": proposal.definition,
+        }
+    if cls_name == "MergeProposal":
+        return "apply_merge", [proposal.keep_tag, proposal.discard_tag], {
+            "keep_tag": proposal.keep_tag,
+            "discard_tag": proposal.discard_tag,
+        }
+    if cls_name == "DeprecateProposal":
+        return "apply_deprecate", [proposal.tag], {"tag": proposal.tag}
+    return "apply_unknown", [], {"type": cls_name}
+
+
+@contextmanager
+def _file_lock(lock_path: Path):
+    """Cross-process exclusive lock via fcntl.flock (POSIX).
+
+    Blocks until the lock is acquired. Lock file is created on demand and
+    intentionally left in place (cleanup would race the lock itself).
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _filter_dangling_refs(assignments: list[dict], vocab: list[dict]) -> int:
@@ -128,9 +257,18 @@ class TagRecordNetwork:
 
         with sqlite_checkpointer(checkpoint_db) as cp:
             graph = build_bootstrap_graph(cp)
-            print(f"[bootstrap] thread_id={thread_id}, checkpoint={checkpoint_db.name}", flush=True)
+            existing = cp.get(config)  # None if no prior checkpoint for this thread_id
+            resuming = bool(existing and existing.get("channel_values"))
+            print(
+                f"[bootstrap] thread_id={thread_id}, checkpoint={checkpoint_db.name}, "
+                f"resuming={resuming}",
+                flush=True,
+            )
 
-            result = graph.invoke(initial_state, config)
+            # Critical: pass None (not initial_state) on resume — else LangGraph
+            # overwrites channel values like `themes` and re-runs distill.
+            invoke_input = None if resuming else initial_state
+            result = graph.invoke(invoke_input, config)
             while "__interrupt__" in result:
                 ipt = result["__interrupt__"][0]
                 payload = ipt.value
@@ -165,6 +303,23 @@ class TagRecordNetwork:
         }
         network = cls(vocab=vocab, assignments=assignments, themes=themes_dict, metadata=metadata)
         network.validate()
+        emit_network_event(
+            "bootstrap_init",
+            {
+                "source_db": str(db_path),
+                "thread_id": thread_id,
+                "vocab_size": len(vocab),
+                "assignment_count": len(assignments),
+                "themes_count": len(themes_dict),
+                "synthesize_attempts": result.get("synthesize_attempts", 1),
+            },
+            [t["name"] for t in vocab],
+            [], [],                      # before: empty network
+            vocab, assignments,          # after: constructed
+            actor="bootstrap",
+            run_id=thread_id,
+            reasoning=f"initial bootstrap from {db_path}",
+        )
         return network
 
     @classmethod
@@ -220,28 +375,46 @@ class TagRecordNetwork:
         network.validate()
         return network
 
-    def save(self, path: Path) -> None:
-        """Atomically save network to a single JSON snapshot file."""
+    def save(self, path: Path, *, keep_backup: bool = True) -> None:
+        """Atomically save network to a single JSON snapshot file.
+
+        Acquires an exclusive cross-process lock at `{path}.lock` for the
+        full save. Concurrent `save()` calls on the same path block.
+
+        If `keep_backup=True` and `path` already exists, the pre-save
+        content is copied to `{path}.bak` (overwriting any prior backup)
+        before the new content is committed. To roll back: copy `.bak`
+        back over the main file.
+
+        Note: the lock only spans `save()`. For consistent
+        load → mutate → save across processes, callers must hold the
+        lock externally (acquire `_file_lock({path}.lock)` themselves).
+        """
         self.metadata["last_modified"] = time.time()
         self.metadata["vocab_hash"] = _vocab_hash(self.vocab)
         self.metadata.setdefault("schema_version", SCHEMA_VERSION)
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(
-                {
-                    "vocab": self.vocab,
-                    "assignments": self.assignments,
-                    "metadata": self.metadata,
-                    "themes": self.themes,
-                },
-                indent=2,
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
+        bak = path.with_suffix(path.suffix + ".bak")
+        lock_path = path.with_suffix(path.suffix + ".lock")
+
+        content = json.dumps(
+            {
+                "vocab": self.vocab,
+                "assignments": self.assignments,
+                "metadata": self.metadata,
+                "themes": self.themes,
+            },
+            indent=2,
+            ensure_ascii=False,
         )
-        tmp.replace(path)
+
+        with _file_lock(lock_path):
+            tmp.write_text(content, encoding="utf-8")
+            if keep_backup and path.exists():
+                shutil.copy2(path, bak)
+            tmp.replace(path)
 
     # ── Derived state ────────────────────────────────────────────────────
 
@@ -270,13 +443,43 @@ class TagRecordNetwork:
 
     # ── Mutation ─────────────────────────────────────────────────────────
 
-    def apply(self, proposal: Any) -> None:
-        """Apply a proposal in-place. vocab + assignments updated atomically."""
+    def apply(
+        self,
+        proposal: Any,
+        *,
+        actor: str = "unknown",
+        run_id: str = "",
+        reasoning: str = "",
+    ) -> None:
+        """Apply a proposal in-place. vocab + assignments updated atomically.
+
+        Audit: on success, emits a `network.apply` event via the default
+        RunLogger with state hashes, affected tags/records, before/after
+        metrics, and the caller-supplied actor/run_id/reasoning.
+
+        Args:
+            actor: who triggered this — 'bootstrap' | 'agent:propose_<X>' |
+                'ingest' | 'manual:<script>' | 'rollback'. Defaults to
+                'unknown' (legacy callers).
+            run_id: groups events from one logical run. Recommended to use
+                LangGraph thread_id for graph-driven mutations.
+            reasoning: LLM justification or human note. Empty for purely
+                deterministic ops.
+        """
+        before_vocab = list(self.vocab)
+        before_assignments = list(self.assignments)
         new_vocab, new_assignments = _apply_proposal(self.vocab, self.assignments, proposal)
         self.vocab = new_vocab
         self.assignments = new_assignments
         self.metadata["last_modified"] = time.time()
         self.metadata["vocab_hash"] = _vocab_hash(self.vocab)
+
+        emit_apply_event(
+            before_vocab, before_assignments,
+            self.vocab, self.assignments,
+            proposal,
+            actor=actor, run_id=run_id, reasoning=reasoning,
+        )
 
     # ── Streaming ingest ─────────────────────────────────────────────────
 
@@ -290,6 +493,7 @@ class TagRecordNetwork:
         reverse_check_fn: Callable | None = None,
         propose_new_fn: Callable | None = None,
         records_fetcher: Callable[[list[str]], list[dict]] | None = None,
+        run_id: str | None = None,
     ) -> "IngestResult":
         """Process a batch of new records.
 
@@ -314,6 +518,9 @@ class TagRecordNetwork:
         """
         if not self.vocab:
             raise ValueError("vocab is empty; run bootstrap() or load() first before ingest_batch")
+
+        if run_id is None:
+            run_id = f"ingest-{int(time.time())}"
 
         # Step 1: dedup
         existing_ids = {a["record_id"] for a in self.assignments}
@@ -350,6 +557,7 @@ class TagRecordNetwork:
             propose_new_fn=propose_new_fn,
             records_fetcher=records_fetcher,
             reverse_check_fn=reverse_check_fn,
+            run_id=run_id,
         )
 
         self.metadata["last_modified"] = time.time()
@@ -374,6 +582,7 @@ class TagRecordNetwork:
         reverse_check_fn: Callable | None = None,
         propose_new_fn: Callable | None = None,
         records_fetcher: Callable[[list[str]], list[dict]] | None = None,
+        run_id: str | None = None,
     ) -> "IngestResult":
         """Force a propose_new check on the accumulated pending pool.
 
@@ -385,6 +594,9 @@ class TagRecordNetwork:
         if not self.vocab:
             raise ValueError("vocab is empty; run bootstrap() or load() first before flush_pending")
 
+        if run_id is None:
+            run_id = f"flush-{int(time.time())}"
+
         new_tags_added, absorbed = self._maybe_propose_and_recheck(
             propose_threshold=propose_threshold,
             concurrency=concurrency,
@@ -392,6 +604,7 @@ class TagRecordNetwork:
             propose_new_fn=propose_new_fn,
             records_fetcher=records_fetcher,
             reverse_check_fn=reverse_check_fn,
+            run_id=run_id,
         )
 
         self.metadata["last_modified"] = time.time()
@@ -416,6 +629,7 @@ class TagRecordNetwork:
         propose_new_fn: Callable | None,
         records_fetcher: Callable | None,
         reverse_check_fn: Callable | None,
+        run_id: str = "",
     ) -> tuple[list[str], int]:
         """If pending pool ≥ threshold, propose new tags, apply, re-check whole pool.
 
@@ -438,7 +652,12 @@ class TagRecordNetwork:
             name = c["name"] if isinstance(c, dict) else c.name
             definition = c["definition"] if isinstance(c, dict) else c.definition
             try:
-                self.apply(NewTagProposal(name=name, definition=definition))
+                self.apply(
+                    NewTagProposal(name=name, definition=definition),
+                    actor="ingest",
+                    run_id=run_id,
+                    reasoning="auto-added by propose_new (pool ≥ threshold)",
+                )
                 new_tag_names.append(name)
             except (InvalidProposal, OrphanError) as e:
                 # Expected: duplicate name, self-merge, orphan-creating deprecate
@@ -458,6 +677,9 @@ class TagRecordNetwork:
         re_checked = _reverse_check(pending_raw, self.vocab, concurrency)
         _filter_dangling_refs(re_checked, self.vocab)
 
+        # Snapshot for audit-event diff before swapping pool entries.
+        before_assignments = list(self.assignments)
+
         # Replace pool entries in assignments with re-checked results
         re_by_id = {a["record_id"]: a for a in re_checked}
         self.assignments = [
@@ -467,6 +689,23 @@ class TagRecordNetwork:
 
         absorbed = sum(1 for a in re_checked if not a.get("missing"))
 
+        emit_network_event(
+            "repool_recheck",
+            {
+                "trigger": "post_propose_new",
+                "new_tags": list(new_tag_names),
+                "pool_size": len(pending_ids),
+                "absorbed": absorbed,
+                "still_missing": len(pending_ids) - absorbed,
+            },
+            list(new_tag_names),
+            self.vocab, before_assignments,
+            self.vocab, self.assignments,
+            actor="ingest",
+            run_id=run_id,
+            reasoning=f"pool of {len(pending_ids)} re-classified after adding {len(new_tag_names)} new tag(s); {absorbed} absorbed",
+        )
+
         # Additively expand the new tags' coverage to already-assigned records
         # whose themes are semantically close (uses embedding + LLM binary check).
         # This fixes the propose_new asymmetry: new tags only got pending-pool
@@ -475,7 +714,7 @@ class TagRecordNetwork:
         if self.themes:  # only if we have themes to embed; safe degradation otherwise
             try:
                 from .propose.additive import expand_new_tag_coverage
-                additions = expand_new_tag_coverage(self, new_tag_names)
+                additions = expand_new_tag_coverage(self, new_tag_names, run_id=run_id)
                 total_additions = sum(additions.values())
                 if total_additions:
                     print(f"  [ingest] additively attached new tags to {total_additions} existing records", flush=True)

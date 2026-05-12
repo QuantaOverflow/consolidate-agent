@@ -11,14 +11,43 @@ short-circuits without interrupting.
 """
 from __future__ import annotations
 
-import io
+import json
 from pathlib import Path
 from typing import Any, Callable
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt
 
+from ..observability import get_default_logger
 from .state import BootstrapState
+
+
+class _JsonlToLogger:
+    """Adapter: `distill_step` / `synthesize_step` write jsonl lines here;
+    each line is forwarded to the active `RunLogger` as a structured event.
+
+    Replaces the legacy `io.StringIO()` sink (silently discarded the data).
+    """
+    def __init__(self):
+        self._logger = get_default_logger()
+
+    def write(self, s: str) -> None:
+        s = s.strip()
+        if not s:
+            return
+        try:
+            data = json.loads(s)
+            phase = data.pop("phase", "bootstrap")
+            # batch-level vs phase-level: distill_step writes both
+            if "batch" in data:
+                self._logger.event(f"{phase}.batch", **data)
+            else:
+                self._logger.event(f"{phase}.summary", **data)
+        except json.JSONDecodeError:
+            self._logger.event("bootstrap.raw_log", raw=s[:500])
+
+    def flush(self) -> None:
+        pass
 
 
 # ── Default node implementations (LLM-backed) ────────────────────────────────
@@ -39,22 +68,34 @@ def _default_distill(records: list[dict], batch_size: int) -> list[dict]:
     def model_factory():
         return _chat_model(settings)
 
-    log_sink = io.StringIO()
+    log_sink = _JsonlToLogger()
     return distill_step(model_factory, records, batch_size, log_sink)
 
 
 def _default_synthesize(themes: list[dict]) -> dict:
-    """Real LLM synthesize: themes → {vocab, notes}."""
+    """Real LLM synthesize: themes → {vocab, notes}.
+
+    Uses qwen-max specifically (overrides Settings.qwen_model) because
+    qwen-plus's thinking-mode default makes single-shot synthesis on 500+
+    themes hit the 300s server-side timeout. qwen-max is faster on this
+    task and produces less-over-abstracted vocab.
+    """
+    from langchain_qwq import ChatQwen
     from consolidate_agent.config import Settings
-    from consolidate_agent.consolidation._utils import _chat_model
 
     from ..bootstrap import synthesize_step
 
     settings = Settings()
     def model_factory():
-        return _chat_model(settings)
+        return ChatQwen(
+            model="qwen-max",
+            api_key=settings.dashscope_api_key,
+            base_url=settings.dashscope_api_base,
+            temperature=0,
+            request_timeout=600,
+        )
 
-    log_sink = io.StringIO()
+    log_sink = _JsonlToLogger()
     return synthesize_step(model_factory, themes, log_sink)
 
 
@@ -117,6 +158,7 @@ def build_bootstrap_graph(
     # ── Nodes ────────────────────────────────────────────────────────────
 
     def distill_node(state: BootstrapState) -> dict:
+        logger = get_default_logger()
         records = load_records_impl(state["db_path"])
         seed = state.get("themes_seed") or {}
 
@@ -135,17 +177,28 @@ def build_bootstrap_graph(
         if cached:
             print(f"  [distill] {len(cached)}/{len(records)} themes from seed (zero LLM)", flush=True)
 
-        if to_distill:
-            print(f"  [distill] running LLM on {len(to_distill)} uncached records", flush=True)
-            fresh = distill_impl(to_distill, state.get("batch_size", 30))
-        else:
-            fresh = []
+        with logger.timed("phase.distill",
+                          records_total=len(records),
+                          from_seed=len(cached),
+                          to_distill=len(to_distill)):
+            if to_distill:
+                print(f"  [distill] running LLM on {len(to_distill)} uncached records", flush=True)
+                fresh = distill_impl(to_distill, state.get("batch_size", 30))
+            else:
+                fresh = []
 
         return {"themes": cached + fresh}
 
     def synthesize_node(state: BootstrapState) -> dict:
-        result = synthesize_impl(state["themes"])
+        logger = get_default_logger()
         attempts = state.get("synthesize_attempts", 0) + 1
+        with logger.timed("phase.synthesize",
+                          themes_in=len(state["themes"]),
+                          attempt=attempts):
+            result = synthesize_impl(state["themes"])
+        logger.event("phase.synthesize.summary",
+                     vocab_size=len(result.get("vocab", [])),
+                     notes=str(result.get("notes", ""))[:300])
         return {
             "vocab": result.get("vocab", []),
             "synthesize_notes": result.get("notes", ""),
@@ -155,8 +208,11 @@ def build_bootstrap_graph(
 
     def vocab_review_node(state: BootstrapState) -> dict:
         """HITL gate. Returns {review_decision}. Auto-accepts if state.auto_accept."""
+        logger = get_default_logger()
         if state.get("auto_accept"):
+            logger.event("phase.review.auto_accept", vocab_size=len(state.get("vocab", [])))
             return {"review_decision": "accept"}
+        logger.event("phase.review.interrupt", vocab_size=len(state.get("vocab", [])))
         decision = interrupt({
             "stage": "vocab_review",
             "vocab": state["vocab"],
@@ -166,13 +222,24 @@ def build_bootstrap_graph(
         # decision is whatever Command(resume=X) passes — string in our convention
         if decision not in ("accept", "regenerate", "abort"):
             decision = "accept"  # safe default for malformed input
+        logger.event("phase.review.decision", decision=decision)
         return {"review_decision": decision}
 
     def reverse_check_node(state: BootstrapState) -> dict:
-        assignments = reverse_check_impl(
-            state["db_path"], state["vocab"], state.get("concurrency", 10),
-        )
-        dropped = _filter_dangling_refs(assignments, state["vocab"])
+        logger = get_default_logger()
+        with logger.timed("phase.reverse_check",
+                          vocab_size=len(state["vocab"]),
+                          concurrency=state.get("concurrency", 10)):
+            assignments = reverse_check_impl(
+                state["db_path"], state["vocab"], state.get("concurrency", 10),
+            )
+            dropped = _filter_dangling_refs(assignments, state["vocab"])
+        missing = sum(1 for a in assignments if a.get("missing"))
+        logger.event("phase.reverse_check.summary",
+                     assignments=len(assignments),
+                     missing=missing,
+                     dangling_dropped=dropped,
+                     hit_rate=round((len(assignments) - missing) / max(1, len(assignments)), 4))
         return {"assignments": assignments, "fake_tag_drops": dropped}
 
     def abort_node(state: BootstrapState) -> dict:

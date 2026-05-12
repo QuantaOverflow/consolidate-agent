@@ -39,27 +39,20 @@ Expected false-positive rate ~5-15% on multi-domain real data.
 
 ---
 
-## 2. `propose_merge_fn` has same focus bug `propose_deprecate` had (now fixed)
+## 2. `propose_merge_fn` focus bug — FIXED
 
 **Path**: `propose/merge.py` — `propose_merge_fn(vocab, assignments, focus, ...)`
 
-**Status**: NOT FIXED.
+**Status**: FIXED. `propose_merge_fn` reuses `_extract_focus_tags` from
+`deprecate.py`. When focus names vocab tags, candidate pairs are restricted:
+1 focus tag → pairs containing it; ≥2 focus tags → pairs entirely within
+the focus set. Both paths bypass `min_cooccur` so agent-directed evaluation
+isn't suppressed by the default cooccur threshold. Empty focus preserves
+the original top-K behavior.
 
-Commit `c20f24f` fixed `propose_deprecate_fn` to respect the agent's
-`focus` parameter (only evaluate tags named in focus). The analogous code
-path in `propose_merge_fn` was not touched — it still scans all
-high-cooccurrence pairs regardless of focus.
-
-**Risk**: if agent's diagnose returns `action_focus="target pair a + b"` and
-selects propose_merge, `propose_merge_fn` may propose merges outside the
-focused pair.
-
-**Why we haven't hit it**: in fake-corpus testing, the agent's
-diagnose always picked `done` or `propose_deprecate` — never propose_merge.
-
-**Fix** (~20 lines): add `_extract_focus_tags()` parallel to deprecate's;
-if focus names a tag, restrict cooccurrence-pair scan to pairs containing
-that tag.
+**Not yet validated with real LLM**: the partial-apply path in `apply_node`
+has only been exercised end-to-end on deprecate proposals; merge proposals
+share the same code so should work, but no real run has confirmed it.
 
 ---
 
@@ -113,17 +106,19 @@ Mental model inconsistency.
 
 ---
 
-## 6. No backup mechanism for `network.json`
+## 6. Network backup — FIXED (single rolling `.bak`)
 
-**Path**: `network.py` — `Network.save()`
+**Path**: `network.py` — `Network.save(path, *, keep_backup=True)`
 
-**Status**: atomic write via tmp + rename, but each save overwrites the
-previous. If a bad run corrupts the network state, there's no auto-rollback.
+**Status**: FIXED. Every `save()` copies the previous file content to
+`{path}.bak` before writing the new content (atomic tmp + replace). Single
+rolling backup — `.bak` always contains the version that existed
+immediately before the most recent save. To roll back:
+`cp network.json.bak network.json`.
 
-**Workaround**: caller scripts should `cp` before save.
-
-**Fix**: `save(path, keep_backup=True)` option that moves previous to
-`{path}.bak` before writing the new file.
+**Limitation**: only one level deep. If two consecutive saves are both
+bad, the original state is lost. For longer history, version-control
+the file or copy to dated archives externally.
 
 ---
 
@@ -159,18 +154,24 @@ callbacks. Emit `llm.tokens` events alongside `llm.success` / `llm.error`.
 
 ---
 
-## 9. Concurrent runs are unsafe
+## 9. Concurrent runs — partially fixed
 
 **Path**: any code that loads + saves the same `network.json`
 
-**Status**: no file lock. Two simultaneous `bootstrap` or `ingest_batch`
-calls on the same network path: the second `save()` overwrites the first's
-result.
+**Status**: `save()` now holds a cross-process `fcntl.LOCK_EX` at
+`{path}.lock`, so two simultaneous `save()` calls serialize correctly
+(no torn writes, no lost atomic-replace).
 
-**Workaround**: ensure single-user / single-process discipline.
+**Still unsafe**: the lost-update problem across full load → mutate → save.
+Process A loads state v1, process B loads v1, both mutate independently,
+both save serially → second save overwrites first's mutations.
 
-**Fix**: `fcntl` file lock on `network.json` before load + during save.
-Or migrate to a proper DB (SQLite).
+**Workaround**: keep the single-process discipline (one bootstrap/ingest
+at a time), or have callers acquire `_file_lock(network.json.lock)`
+externally around the full load → mutate → save cycle.
+
+**Real fix**: migrate to SQLite (see overall storage discussion). Until
+then, mutation throughput is by design single-writer.
 
 ---
 

@@ -143,18 +143,19 @@ def _run_single_batch(
     Returns (batch_idx, list_of_assignments, elapsed_seconds).
     On failure, returns assignments marked as missing with error reason.
     """
+    from .observability import invoke_with_retry
+
     t0 = time.perf_counter()
-    try:
-        messages = prompt.invoke({
-            "tag_count": len(vocab),
-            "vocab": format_vocab(vocab),
-            "batch_size": len(batch_records),
-            "records": format_records(batch_records),
-        })
-        result: BatchAssignmentOutput | None = model.invoke(messages)
-        if result is None:
-            raise ValueError("structured output returned None (LLM output unparseable)")
-    except Exception as exc:  # noqa: BLE001
+    messages = prompt.invoke({
+        "tag_count": len(vocab),
+        "vocab": format_vocab(vocab),
+        "batch_size": len(batch_records),
+        "records": format_records(batch_records),
+    })
+    result: BatchAssignmentOutput | None = invoke_with_retry(
+        model, messages, retries=3, caller=f"reverse_check.batch_{batch_idx}",
+    )
+    if result is None:
         elapsed = time.perf_counter() - t0
         out = [{
             "record_id": rec["record_id"],
@@ -162,7 +163,7 @@ def _run_single_batch(
             "selected_tags": [],
             "missing": True,
             "missing_concept": "",
-            "reason": f"batch failure: {str(exc)[:200]}",
+            "reason": "batch failure: LLM returned None or validation error after 3 retries",
         } for rec in batch_records]
         return batch_idx, out, elapsed
 

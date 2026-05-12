@@ -126,6 +126,7 @@ class Agent:
             "max_iter": self.max_iter,
             "hit_rate_regression_threshold": self.hit_rate_regression_threshold,
             "disabled_actions": list(self.disabled_actions),
+            "run_id": thread_id,
         }
 
         # Recursion limit: each iter walks 4-6 nodes; allow 6 × max_iter + buffer.

@@ -139,9 +139,10 @@ def judge_tag(
         "other_vocab_count": len(other_vocab),
         "other_vocab": format_other_vocab(other_vocab, tag["name"]),
     })
-    result: DeprecateJudgement | None = model.invoke(messages)
-    if result is None:
-        result = model.invoke(messages)
+    from ..observability import invoke_with_retry
+    result: DeprecateJudgement | None = invoke_with_retry(
+        model, messages, retries=3, caller=f"propose_deprecate.{tag['name']}",
+    )
     return result
 
 
