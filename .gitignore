@@ -25,11 +25,13 @@ build/
 outputs/
 outputs-*/
 
-# Derived eval fixtures — regenerable via tests/fixtures/build_scenarios.py
-# Keep expected.json (hand-curated ground truth) tracked.
-tests/fixtures/scenario_*/vocab.json
-tests/fixtures/scenario_*/diagnostics.json
-tests/fixtures/scenario_*/assignments.json
+# Eval scaffolding and ground truth — local only, not for CI
+# (CI runs only unit/integration tests in tests/test_*.py)
+scripts/eval_diagnose.py
+scripts/eval_suite.py
+scripts/testset.json
+tests/fixtures/build_scenarios.py
+tests/fixtures/scenario_*/
 
 # OS/editor noise
 .DS_Store
