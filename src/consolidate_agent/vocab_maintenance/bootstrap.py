@@ -653,12 +653,16 @@ def synthesize_via_clustering(
     n = len(theme_texts)
 
     # ── Stage 1: embed all themes ──
-    print(f"  [cluster.embed] embedding {n} themes", flush=True)
+    # DashScope embedding QPS is tighter than chat completion. Cap concurrency
+    # at 5 here to avoid Throttling.RateQuota during the burst, regardless of
+    # the LLM-naming concurrency. _embed has internal backoff retry too.
+    embed_concurrency = min(5, concurrency)
+    print(f"  [cluster.embed] embedding {n} themes (concurrency={embed_concurrency})",
+          flush=True)
     log_file.write(json.dumps({"phase": "cluster_embed.start", "n_themes": n}) + "\n")
     log_file.flush()
     t0 = time.perf_counter()
-    # _embed is LRU-cached; concurrent embed calls are I/O bound
-    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+    with ThreadPoolExecutor(max_workers=embed_concurrency) as ex:
         vecs = list(ex.map(_embed, theme_texts))
     embed_elapsed = time.perf_counter() - t0
     print(f"  [cluster.embed] done ({embed_elapsed:.1f}s)", flush=True)

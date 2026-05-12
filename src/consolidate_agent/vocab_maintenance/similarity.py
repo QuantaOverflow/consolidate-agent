@@ -8,23 +8,38 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
+import time
 from functools import lru_cache
 from pathlib import Path
 
 from dashscope import TextEmbedding
 
 
-@lru_cache(maxsize=1024)
+@lru_cache(maxsize=4096)
 def _embed(text: str, model: str = "text-embedding-v3") -> tuple[float, ...]:
-    """Get embedding via DashScope. Cached per text."""
+    """Get embedding via DashScope. Cached per text.
+
+    Retries with exponential backoff + jitter on transient throttling
+    (`Throttling.RateQuota`). DashScope embedding QPS is ~50/account
+    for v3, so concurrency × call-rate easily exceeds it — back off
+    rather than crash the whole synthesize.
+    """
     api_key = os.environ.get("DASHSCOPE_API_KEY")
     if not api_key:
         raise RuntimeError("DASHSCOPE_API_KEY not set")
-    resp = TextEmbedding.call(model=model, input=text, api_key=api_key)
-    if resp.status_code != 200:
-        raise RuntimeError(f"embedding failed: {resp.code} {resp.message}")
-    vec = resp.output["embeddings"][0]["embedding"]
-    return tuple(vec)
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        resp = TextEmbedding.call(model=model, input=text, api_key=api_key)
+        if resp.status_code == 200:
+            return tuple(resp.output["embeddings"][0]["embedding"])
+        code = getattr(resp, "code", "")
+        if "Throttling" in str(code) and attempt < max_attempts:
+            # 0.5, 1, 2, 4 seconds + jitter
+            time.sleep((0.5 * (2 ** (attempt - 1))) + random.uniform(0, 0.5))
+            continue
+        raise RuntimeError(f"embedding failed: {code} {resp.message}")
+    raise RuntimeError(f"embedding failed after {max_attempts} attempts: throttled")
 
 
 def cosine(a: tuple[float, ...], b: tuple[float, ...]) -> float:
