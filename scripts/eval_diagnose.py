@@ -13,6 +13,7 @@ from consolidate_agent.vocab_maintenance.similarity import find_similar_pairs
 
 BASE = Path(__file__).resolve().parents[1]
 FIXTURES = BASE / "tests/fixtures"
+OUTPUTS = BASE / "outputs/eval_diagnose"
 DB = BASE / "outputs/knowledge.db"
 
 
@@ -199,7 +200,8 @@ def run(scenarios: list[str] | None = None):
     n_total = len(all_results)
     print(f"\nOverall: {n_passed}/{n_total} passed")
 
-    out = FIXTURES / "eval_results.json"
+    OUTPUTS.mkdir(parents=True, exist_ok=True)
+    out = OUTPUTS / "results.json"
     out.write_text(json.dumps(all_results, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Details → {out}")
 
