@@ -437,6 +437,55 @@ def test_u10_history_length():
 # ── Runner ───────────────────────────────────────────────────────────────────
 
 
+# U11: disabled_actions makes them blocked from iter 1 + visible to diagnose
+@test
+def test_u11_disabled_actions_blocked_from_start():
+    vocab = mk_vocab(["a", "b"])
+    assignments = mk_assignments({"r1": ["a"], "r2": ["b"]})
+    diag = mk_diagnostics(assignments, vocab)
+
+    diagnose = make_diagnose_seq([
+        {"next_action": "done", "action_focus": "", "confidence": "high"}
+    ])
+    agent = Agent(
+        measure_fn=make_constant_measure(diag, assignments),
+        diagnose_fn=diagnose,
+        propose_fns={},
+        disabled_actions={"propose_new"},
+    )
+    state, status = agent.run(vocab)
+    # Even before any iter ran, propose_new should be in blocked_actions
+    assert "propose_new" in state.blocked_actions
+    # diagnose was called with propose_new already in the blocked list
+    assert diagnose._captured_blocked[0] == ["propose_new"]
+    check_loop_invariants(state, status, 5)
+
+
+# U12: disabled_actions persist — never get removed during loop
+@test
+def test_u12_disabled_actions_persist_across_iters():
+    vocab = mk_vocab(["a", "b"])
+    assignments = mk_assignments({"r1": ["a"], "r2": ["b"]})
+    diag = mk_diagnostics(assignments, vocab)
+
+    propose_merge = make_propose_constant([MergeProposal(keep_tag="a", discard_tag="b")])
+    diagnose = make_diagnose_seq([
+        {"next_action": "propose_merge", "action_focus": "", "confidence": "high"},
+        {"next_action": "done", "action_focus": "", "confidence": "high"},
+    ])
+    agent = Agent(
+        measure_fn=make_constant_measure(diag, assignments),
+        diagnose_fn=diagnose,
+        propose_fns={"propose_merge": propose_merge},
+        disabled_actions={"propose_new"},
+    )
+    state, status = agent.run(vocab)
+    # disabled_actions still in blocked_actions even after a successful apply
+    assert "propose_new" in state.blocked_actions
+    # diagnose called at iter 2 still sees propose_new blocked
+    assert "propose_new" in diagnose._captured_blocked[-1]
+
+
 def main():
     passed = 0
     failed = 0

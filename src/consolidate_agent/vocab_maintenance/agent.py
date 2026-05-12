@@ -82,12 +82,16 @@ class Agent:
         propose_fns: dict[str, Callable[..., list]],
         max_iter: int = 5,
         hit_rate_regression_threshold: float = 0.03,
+        disabled_actions: set[str] | frozenset[str] | None = None,
     ):
         self.measure_fn = measure_fn
         self.diagnose_fn = diagnose_fn
         self.propose_fns = propose_fns
         self.max_iter = max_iter
         self.hit_rate_regression_threshold = hit_rate_regression_threshold
+        # Permanently-blocked actions (e.g., maintenance disables propose_new
+        # because the growth path lives in ingest_batch, not in the agent loop).
+        self.disabled_actions: set[str] = set(disabled_actions or ())
 
     def run(self, initial_vocab: list[dict]) -> tuple[AgentState, FinalStatus]:
         # Initial measure
@@ -96,6 +100,7 @@ class Agent:
             vocab=list(initial_vocab),
             assignments=list(assignments),
             diagnostics=diag,
+            blocked_actions=set(self.disabled_actions),
         )
         check_invariants(state.vocab, state.assignments)
 

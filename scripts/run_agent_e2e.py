@@ -26,7 +26,6 @@ from consolidate_agent.vocab_maintenance.measure import (
     reverse_check_subset,
 )
 from consolidate_agent.vocab_maintenance.network import TagRecordNetwork
-from consolidate_agent.vocab_maintenance.propose.new import propose_new_fn
 from consolidate_agent.vocab_maintenance.propose.merge import propose_merge_fn
 from consolidate_agent.vocab_maintenance.propose.deprecate import propose_deprecate_fn
 
@@ -100,8 +99,12 @@ def diagnose_fn(vocab, diagnostics, assignments, **kwargs):
 
 
 def build_propose_fns(db_path: Path):
+    """Maintenance agent's tool kit: merge + deprecate only.
+
+    propose_new is intentionally absent — vocab growth belongs to ingest_batch,
+    not to the maintenance loop. Maintenance is consolidation-only.
+    """
     return {
-        "propose_new": lambda v, a, f: propose_new_fn(v, a, f, db_path=db_path),
         "propose_merge": lambda v, a, f: propose_merge_fn(v, a, f, db_path=db_path),
         "propose_deprecate": lambda v, a, f: propose_deprecate_fn(v, a, f, db_path=db_path),
     }
@@ -172,6 +175,7 @@ def main():
         diagnose_fn=diagnose_fn,
         propose_fns=propose_fns,
         max_iter=args.max_iter,
+        disabled_actions={"propose_new"},  # growth handled by ingest_batch
     )
 
     t0 = time.perf_counter()
