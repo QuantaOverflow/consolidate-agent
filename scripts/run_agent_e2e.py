@@ -78,14 +78,32 @@ def build_measure_fn(
         delta_by_id = {a["record_id"]: a for a in delta}
         return [delta_by_id.get(a["record_id"], a) for a in current_assignments]
 
+    def _align_to_vocab(assignments, vocab):
+        """Drop tags not in vocab (cache may be from older vocab snapshot).
+        Records with all tags dropped become missing."""
+        vocab_names = {t["name"] for t in vocab}
+        dropped = 0
+        for a in assignments:
+            original = a.get("selected_tags", []) or []
+            filtered = [t for t in original if t["name"] in vocab_names]
+            if len(filtered) < len(original):
+                dropped += len(original) - len(filtered)
+            a["selected_tags"] = filtered
+            if not filtered and not a.get("missing"):
+                a["missing"] = True
+                a["missing_concept"] = a.get("missing_concept") or "all selected_tags absent from current vocab"
+        if dropped:
+            print(f"  [measure] dropped {dropped} cached tag refs absent from current vocab", flush=True)
+        return assignments
+
     def measure_fn(vocab: list[dict], **ctx):
         action = ctx.get("action")
         current_assignments = ctx.get("current_assignments")
         previous_assignments = ctx.get("previous_assignments")
 
         if action is None:
-            # Initial call: use cache as the assignment snapshot.
-            assignments = [dict(a) for a in cached]
+            # Initial call: load cache + drop tags not in current vocab.
+            assignments = _align_to_vocab([dict(a) for a in cached], vocab)
         elif action == "propose_new":
             assignments = _patch_missing_with_new_vocab(
                 vocab, previous_assignments or [], list(current_assignments or [])
