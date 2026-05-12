@@ -149,11 +149,16 @@ def _run_single_batch(
 
 
 def build_diagnostics(vocab: list[dict], assignments: list[dict]) -> dict:
-    """Pure local aggregation of assignments → diagnostics. No LLM."""
+    """Pure local aggregation of assignments → diagnostics. No LLM.
+
+    Single source of truth for vocab diagnostic signals. Used by both the
+    agent loop (post-apply recompute) and the reverse_check CLI.
+    """
     tag_usage: Counter[str] = Counter()
     cooccur: Counter[tuple[str, str]] = Counter()
     missing_records: list[dict] = []
-    boundary_blur: list[dict] = []
+    boundary_blur_records: list[dict] = []
+    low_confidence_records: list[dict] = []
 
     for a in assignments:
         if a.get("missing"):
@@ -164,15 +169,36 @@ def build_diagnostics(vocab: list[dict], assignments: list[dict]) -> dict:
             })
             continue
         tags = a.get("selected_tags", [])
+        if not tags:
+            continue
+
         for t in tags:
             tag_usage[t["name"]] += 1
+
         names = [t["name"] for t in tags]
         for i in range(len(names)):
             for j in range(i + 1, len(names)):
                 cooccur[tuple(sorted([names[i], names[j]]))] += 1
-        confs = [t.get("confidence", "") for t in tags]
-        if len(confs) >= 2 and len(set(confs)) == 1:
-            boundary_blur.append({"record_id": a["record_id"], "title": a.get("title", "")})
+
+        # low-confidence top pick = vocab fits poorly (ordered most-relevant first)
+        if tags[0].get("confidence") == "low":
+            low_confidence_records.append({
+                "record_id": a["record_id"],
+                "title": a.get("title", ""),
+                "selected": tags,
+                "reason": a.get("reason", ""),
+            })
+
+        # boundary blur: 2+ tags at high or medium with identical confidence
+        # (excludes all-low which signals "vocab doesn't fit" rather than ambiguity).
+        high_or_med = [t for t in tags if t.get("confidence") in ("high", "medium")]
+        if len(high_or_med) >= 2 and len({t["confidence"] for t in high_or_med}) == 1:
+            boundary_blur_records.append({
+                "record_id": a["record_id"],
+                "title": a.get("title", ""),
+                "selected": high_or_med,
+                "reason": a.get("reason", ""),
+            })
 
     return {
         "sample_size": len(assignments),
@@ -181,8 +207,8 @@ def build_diagnostics(vocab: list[dict], assignments: list[dict]) -> dict:
         "tag_usage_count": dict(tag_usage.most_common()),
         "unused_tags": sorted({t["name"] for t in vocab} - set(tag_usage)),
         "missing_records": missing_records,
-        "boundary_blur_records": boundary_blur,
-        "low_confidence_records": [],
+        "boundary_blur_records": boundary_blur_records,
+        "low_confidence_records": low_confidence_records,
         "top_cooccurrence_pairs": [{"pair": list(p), "count": c} for p, c in cooccur.most_common(15)],
     }
 
@@ -303,96 +329,38 @@ def run(
 
     # ── Diagnostics ────────────────────────────────────────────────────────────
 
-    tag_usage: Counter[str] = Counter()
-    confidence_by_tag: dict[str, list[str]] = defaultdict(list)
-    cooccurrence: Counter[tuple[str, str]] = Counter()
-    missing_records: list[dict] = []
-    low_confidence_records: list[dict] = []
-    boundary_blur_records: list[dict] = []  # records with 2+ tags at same confidence
-
-    for a in all_assignments:
-        if a["missing"]:
-            missing_records.append({
-                "record_id": a["record_id"],
-                "title": a["title"],
-                "missing_concept": a["missing_concept"],
-            })
-            continue
-
-        tags = a["selected_tags"]
-        if not tags:
-            continue
-
-        # tag usage
-        for t in tags:
-            tag_usage[t["name"]] += 1
-            confidence_by_tag[t["name"]].append(t["confidence"])
-
-        # pairwise co-occurrence
-        for i in range(len(tags)):
-            for j in range(i + 1, len(tags)):
-                pair = tuple(sorted([tags[i]["name"], tags[j]["name"]]))
-                cooccurrence[pair] += 1
-
-        # low-confidence top pick = vocab fits poorly
-        if tags[0]["confidence"] == "low":
-            low_confidence_records.append({
-                "record_id": a["record_id"],
-                "title": a["title"],
-                "selected": tags,
-                "reason": a["reason"],
-            })
-
-        # boundary blur: 2+ tags at high or medium → tag边界模糊
-        high_or_med = [t for t in tags if t["confidence"] in ("high", "medium")]
-        if len(high_or_med) >= 2:
-            confs = [t["confidence"] for t in high_or_med]
-            if len(set(confs)) == 1:  # all same confidence
-                boundary_blur_records.append({
-                    "record_id": a["record_id"],
-                    "title": a["title"],
-                    "selected": high_or_med,
-                    "reason": a["reason"],
-                })
-
-    vocab_names = {t["name"] for t in vocab}
-    unused_tags = sorted(vocab_names - set(tag_usage.keys()))
-
-    diagnostics = {
-        "sample_size": len(all_assignments),
-        "total_assigned": len([a for a in all_assignments if not a["missing"]]),
-        "total_missing": len(missing_records),
-        "tag_usage_count": dict(tag_usage.most_common()),
-        "unused_tags": unused_tags,
-        "missing_records": missing_records,
-        "low_confidence_records": low_confidence_records,
-        "boundary_blur_records": boundary_blur_records,
-        "top_cooccurrence_pairs": [
-            {"pair": list(p), "count": c}
-            for p, c in cooccurrence.most_common(15)
-        ],
-    }
+    diagnostics = build_diagnostics(vocab, all_assignments)
     diagnostics_path.write_text(
         json.dumps(diagnostics, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
-    # console summary
+    # console summary (CLI-only — confidence breakdown not in build_diagnostics
+    # because the agent loop doesn't need it; recompute here cheaply)
+    confidence_by_tag: dict[str, list[str]] = defaultdict(list)
+    for a in all_assignments:
+        if a["missing"]:
+            continue
+        for t in a["selected_tags"]:
+            confidence_by_tag[t["name"]].append(t["confidence"])
+
+    unused = diagnostics["unused_tags"]
     print(f"\n=== Diagnostics ===")
     print(f"Sample: {len(all_assignments)} records")
     print(f"  Assigned: {diagnostics['total_assigned']}")
     print(f"  Missing (no fit): {diagnostics['total_missing']}")
-    print(f"  Low-confidence top pick: {len(low_confidence_records)}")
-    print(f"  Boundary blur (2+ same-confidence tags): {len(boundary_blur_records)}")
-    print(f"\nUnused tags ({len(unused_tags)}/{len(vocab)}): {unused_tags}")
+    print(f"  Low-confidence top pick: {len(diagnostics['low_confidence_records'])}")
+    print(f"  Boundary blur (2+ same-confidence tags): {len(diagnostics['boundary_blur_records'])}")
+    print(f"\nUnused tags ({len(unused)}/{len(vocab)}): {unused}")
     print(f"\nTop 10 most-used tags:")
-    for name, count in tag_usage.most_common(10):
+    for name, count in list(diagnostics["tag_usage_count"].items())[:10]:
         confs = Counter(confidence_by_tag[name])
         print(f"  {name:30s} {count:3d}  (h:{confs.get('high', 0)} m:{confs.get('medium', 0)} l:{confs.get('low', 0)})")
 
     print(f"\nTop 10 co-occurrence pairs:")
-    for p, c in cooccurrence.most_common(10):
-        print(f"  {c:2d} × {p[0]} + {p[1]}")
+    for entry in diagnostics["top_cooccurrence_pairs"][:10]:
+        p = entry["pair"]
+        print(f"  {entry['count']:2d} × {p[0]} + {p[1]}")
 
     print(f"\nFull diagnostics → {diagnostics_path}")
 

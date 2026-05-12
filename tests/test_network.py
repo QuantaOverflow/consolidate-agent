@@ -212,6 +212,47 @@ def test_n9_apply_deprecate_shrinks_vocab():
 
 
 @test
+def test_n_build_diag_low_confidence_record():
+    """Top-pick confidence == 'low' → record listed in low_confidence_records."""
+    vocab = mk_vocab([("a", "def a"), ("b", "def b")])
+    assignments = [
+        {"record_id": "r1", "title": "t1",
+         "selected_tags": [{"name": "a", "confidence": "low"}, {"name": "b", "confidence": "low"}],
+         "missing": False, "missing_concept": "", "reason": "weak match"},
+        {"record_id": "r2", "title": "t2",
+         "selected_tags": [{"name": "a", "confidence": "high"}],
+         "missing": False, "missing_concept": "", "reason": ""},
+    ]
+    diag = build_diagnostics(vocab, assignments)
+    low = diag["low_confidence_records"]
+    assert len(low) == 1
+    assert low[0]["record_id"] == "r1"
+
+
+@test
+def test_n_build_diag_boundary_blur_excludes_all_low():
+    """All-low tags signal 'no fit', not 'ambiguity' — exclude from boundary_blur."""
+    vocab = mk_vocab([("a", "def a"), ("b", "def b"), ("c", "def c")])
+    assignments = [
+        # All low → NOT boundary blur (vocab doesn't fit)
+        {"record_id": "r1", "title": "t1",
+         "selected_tags": [{"name": "a", "confidence": "low"}, {"name": "b", "confidence": "low"}],
+         "missing": False, "missing_concept": "", "reason": ""},
+        # All high → boundary blur (ambiguous fit)
+        {"record_id": "r2", "title": "t2",
+         "selected_tags": [{"name": "a", "confidence": "high"}, {"name": "b", "confidence": "high"}],
+         "missing": False, "missing_concept": "", "reason": ""},
+        # Mixed high+med → NOT boundary blur (different levels)
+        {"record_id": "r3", "title": "t3",
+         "selected_tags": [{"name": "a", "confidence": "high"}, {"name": "b", "confidence": "medium"}],
+         "missing": False, "missing_concept": "", "reason": ""},
+    ]
+    diag = build_diagnostics(vocab, assignments)
+    blur_ids = [r["record_id"] for r in diag["boundary_blur_records"]]
+    assert blur_ids == ["r2"]
+
+
+@test
 def test_n10_diagnostics_matches_build_diag():
     vocab = mk_vocab([("a", "def a"), ("b", "def b")])
     assignments = mk_assignments({"r1": ["a"], "r2": ["b"], "r3": []})
