@@ -40,6 +40,7 @@ from dataclasses import asdict
 from typing import Any, Callable
 
 from langgraph.graph import StateGraph, START, END
+from langgraph.types import interrupt
 
 from ..apply import (
     InvalidProposal,
@@ -61,6 +62,23 @@ def _last_metrics(state: dict) -> dict[str, float]:
     """Most recent metrics snapshot from metrics_history; empty when disabled."""
     hist = state.get("metrics_history") or []
     return hist[-1]["metrics"] if hist else {}
+
+
+def is_converged(iter_deltas: list[dict], threshold: float = 0.005) -> bool:
+    """Phase D: True iff the last 2 iter_deltas both show max-abs delta < threshold.
+
+    Pure function — exposed at module level so tests can exercise it
+    without standing up the whole graph.
+    """
+    if len(iter_deltas) < 2:
+        return False
+    for entry in iter_deltas[-2:]:
+        d = entry.get("delta") or {}
+        if not d:
+            return False
+        if max(abs(v) for v in d.values()) >= threshold:
+            return False
+    return True
 
 
 def _diff_metrics(new: dict[str, float], prior: dict[str, float]) -> dict[str, float]:
@@ -159,12 +177,22 @@ def build_agent_graph(
         return out
 
     def termination_check_node(state: AgentLoopState) -> dict:
-        """Set final_status if any termination condition holds; else no-op."""
+        """Set final_status if any termination condition holds; else no-op.
+
+        Phase D adds convergence: if the last 2 iter_deltas both show
+        max-abs delta across all 5 dims < 0.005, the agent has nothing
+        productive left to do — terminate with status=converged.
+        """
         if state.get("final_status"):
             # Already set (e.g., fatal_error from diagnose) — keep.
             return {}
         if state["iter"] >= state.get("max_iter", 5):
             return {"final_status": "max_iter_exhausted"}
+        # Convergence is checked BEFORE no_actions_remaining so a stable
+        # network exits with the more informative "converged" status even
+        # when all actions happen to be blocked simultaneously.
+        if is_converged(state.get("iter_deltas") or []):
+            return {"final_status": "converged"}
         blocked = set(state.get("blocked_actions", []))
         if blocked.issuperset(ACTIONS):
             return {"final_status": "no_actions_remaining"}
@@ -500,6 +528,38 @@ def build_agent_graph(
             out["iter_deltas"] = [_no_op_iter_delta(state["iter"], action, "blocked_empty")]
         return out
 
+    def hitl_node(state: AgentLoopState) -> dict:
+        """Phase D: HITL escalation when diagnose decision is confidence=low.
+
+        Calls `interrupt()` to pause the graph. Caller resumes with
+        `Command(resume="approve")` (continue with proposed action) or
+        `Command(resume="reject")` (force action=done). Any other value is
+        conservatively treated as reject.
+        """
+        logger = get_default_logger()
+        decision = state.get("decision") or {}
+        logger.event(
+            "agent.iter.hitl.escalate",
+            iter=state["iter"],
+            proposed_action=state.get("action", ""),
+            confidence=decision.get("confidence", ""),
+            uncertainty=decision.get("uncertainty_reasons", []),
+        )
+        user_input = interrupt({
+            "iter": state["iter"],
+            "proposed_action": state.get("action", ""),
+            "focus": state.get("focus", ""),
+            "reasoning": decision.get("reasoning", ""),
+            "uncertainty_reasons": decision.get("uncertainty_reasons", []),
+            "instruction": "Respond with 'approve' to continue or 'reject' to force done.",
+        })
+        if user_input == "approve":
+            logger.event("agent.iter.hitl.resume", iter=state["iter"], decision="approve")
+            return {"hitl_resolved": True}
+        logger.event("agent.iter.hitl.resume", iter=state["iter"],
+                     decision=("reject" if user_input == "reject" else f"unknown:{user_input!r}"))
+        return {"hitl_resolved": True, "action": "done"}
+
     def finalize_done_node(state: AgentLoopState) -> dict:
         logger = get_default_logger()
         rec = dict(state["rec"])
@@ -539,6 +599,10 @@ def build_agent_graph(
         action = state["action"]
         if action == "done":
             return "done"
+        # Phase D: HITL escape on confidence=low — unless already resolved.
+        decision = state.get("decision") or {}
+        if decision.get("confidence") == "low" and not state.get("hitl_resolved"):
+            return "hitl"
         if action in set(state.get("blocked_actions", [])):
             return "blocked"
         if action not in propose_fns:
@@ -571,6 +635,7 @@ def build_agent_graph(
     g.add_node("handle_blocked", handle_blocked_node)
     g.add_node("handle_unknown", handle_unknown_node)
     g.add_node("handle_blocked_empty", handle_blocked_empty_node)
+    g.add_node("hitl", hitl_node)
     g.add_node("record_iter", record_iter_node)
     g.add_node("finalize_done", finalize_done_node)
     g.add_node("finalize_terminate", finalize_terminate_node)
@@ -593,6 +658,22 @@ def build_agent_graph(
             "unknown": "handle_unknown",
             "propose": "propose",
             "terminate": "finalize_terminate",
+            "hitl": "hitl",
+        },
+    )
+
+    # After HITL, re-enter route_action with hitl_resolved=True so the
+    # confidence=low branch doesn't loop.
+    g.add_conditional_edges(
+        "hitl",
+        route_action,
+        {
+            "done": "finalize_done",
+            "blocked": "handle_blocked",
+            "unknown": "handle_unknown",
+            "propose": "propose",
+            "terminate": "finalize_terminate",
+            "hitl": "hitl",  # defensive — should never re-enter
         },
     )
 

@@ -92,6 +92,7 @@ class AgentLoopState(TypedDict, total=False):
     judge_verdict: str                    # Phase B: "commit" / "rollback" / "unsure"
     judge_reasoning: str                  # Phase B: judge's free-text explanation
     judge_confidence: str                 # Phase B: "high" / "medium" / "low"
+    hitl_resolved: bool                   # Phase D: set after hitl_node handled an escalation, prevents re-routing back to hitl
     rec: dict                             # current iter record being assembled
     iter_result: str                      # "applied" / "blocked" / etc, set per node
 

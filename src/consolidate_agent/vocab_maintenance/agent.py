@@ -35,6 +35,7 @@ class FinalStatus(str, Enum):
     COMPLETED = "completed"
     MAX_ITER_EXHAUSTED = "max_iter_exhausted"
     NO_ACTIONS_REMAINING = "no_actions_remaining"
+    CONVERGED = "converged"  # Phase D: last 2 iters' max-abs-delta < 0.005
     FATAL_ERROR = "fatal_error"
 
 
@@ -116,6 +117,28 @@ class Agent:
         # Requires health_fn for the before/after metrics it consumes.
         self.judge_fn = judge_fn
 
+    @staticmethod
+    def _invoke_with_batch_hitl(graph, payload, config) -> dict:
+        """Drive graph.invoke with auto-approve on HITL interrupts.
+
+        Batch mode (runner scripts): every confidence=low escalation is
+        resolved with `Command(resume="approve")` and logged. Interactive
+        HITL (stdin prompt or external callback) is out of scope for
+        Phase D — tests exercise the actual interrupt flow by calling
+        build_agent_graph + graph.invoke(Command(...)) directly.
+        """
+        from langgraph.types import Command
+
+        from .observability import get_default_logger
+
+        result = graph.invoke(payload, config)
+        while result.get("__interrupt__"):
+            logger = get_default_logger()
+            logger.event("agent.hitl.auto_approve",
+                         reason="batch mode — Agent.run defaults to approve")
+            result = graph.invoke(Command(resume="approve"), config)
+        return result
+
     def run(
         self,
         initial_vocab: list[dict],
@@ -148,7 +171,7 @@ class Agent:
                 health_fn=self.health_fn,
                 judge_fn=self.judge_fn,
             )
-            result = graph.invoke(initial_state, invoke_config)
+            result = self._invoke_with_batch_hitl(graph, initial_state, invoke_config)
         else:
             from .graphs.checkpointer import sqlite_checkpointer
             with sqlite_checkpointer(self.checkpoint_db) as cp:
@@ -157,8 +180,10 @@ class Agent:
                     measure_fn=self.measure_fn,
                     diagnose_fn=self.diagnose_fn,
                     propose_fns=self.propose_fns,
+                    health_fn=self.health_fn,
+                    judge_fn=self.judge_fn,
                 )
-                result = graph.invoke(initial_state, invoke_config)
+                result = self._invoke_with_batch_hitl(graph, initial_state, invoke_config)
 
         # Convert dict state → dataclass for backward compat.
         history = [
