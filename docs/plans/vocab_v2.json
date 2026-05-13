@@ -19,7 +19,7 @@
         },
         {
           "name": "persistence_db",
-          "definition": "SQLite/relational database operations: schema design, migrations (column add/drop/rename), INSERT/SELECT statements, transaction boundaries, DEFAULT handling, index design. Covers KnowledgeStore, sqlite3 module, schema evolution. Boundary: not about in-memory state (use langgraph_state) or file-based config (use config_env)."
+          "definition": "Persistence-layer and database operations: SQLite/relational schema design, migrations (column add/drop/rename), INSERT/SELECT statements, transaction boundaries, DEFAULT handling, index design. Covers KnowledgeStore, sqlite3 module, schema evolution and on-disk storage. Boundary: not about in-memory state (use langgraph_state) or file-based config (use config_env)."
         },
         {
           "name": "filesystem_path",
@@ -81,39 +81,39 @@
       "tags": [
         {
           "name": "designing",
-          "definition": "Architecting new components, choosing interfaces, defining schemas, modeling state structures, deciding abstraction boundaries. The pre-implementation thinking phase."
+          "definition": "Designing and architecting new components: choosing interfaces, defining schemas, modeling state structures, deciding abstraction boundaries. The pre-implementation design phase where shape and contracts are decided."
         },
         {
           "name": "debugging",
-          "definition": "Investigating unexpected behavior, tracing failures, narrowing root cause, inspecting logs/state under failure conditions. Reactive problem-solving."
+          "definition": "Debugging and investigating unexpected behavior: tracing failures, narrowing root cause, inspecting logs/state under failure conditions. Reactive debugging activity, not preventive design."
         },
         {
           "name": "refactoring",
-          "definition": "Restructuring existing code without changing observable behavior: extracting modules, renaming, decoupling, eliminating duplication, improving abstraction quality."
+          "definition": "Refactoring existing code without changing observable behavior: extracting modules, renaming, decoupling, eliminating duplication, improving abstraction quality. The refactor-without-changing-semantics activity."
         },
         {
           "name": "testing",
-          "definition": "Writing tests, designing fixtures, validating behavior under boundary conditions, integration test setup. The act of building test coverage."
+          "definition": "Testing activity — writing tests, designing fixtures, validating behavior under boundary conditions, integration testing setup. The act of building or executing test coverage."
         },
         {
           "name": "documenting",
-          "definition": "Writing README/CONTRIBUTING/AGENTS.md/docstrings, contributor guides, ADRs, runbooks. Producing human-readable references about the system."
+          "definition": "Documenting the system — writing README/CONTRIBUTING/AGENTS.md/docstrings, contributor guides, ADRs, runbooks. Producing human-readable documentation."
         },
         {
           "name": "configuring",
-          "definition": "Setting up environment variables, .env files, secrets, configuration parameters, runtime flags. The act of provisioning or adjusting system configuration."
+          "definition": "Configuring runtime — setting up environment variables, .env files, secrets, configuration parameters, runtime flags. The act of provisioning or adjusting configuration."
         },
         {
           "name": "migrating",
-          "definition": "Moving from old to new structure: schema migrations, dependency upgrades, framework version bumps, breaking API changes. Coordinated transitions."
+          "definition": "Migrating from old to new structure: schema migrations, dependency upgrades, framework version bumps, breaking API changes. Coordinated migration transitions across releases."
         },
         {
           "name": "deploying",
-          "definition": "Releasing code to environments, CI/CD execution, build pipeline operations, environment promotion, secret rotation. The act of getting code into a running state."
+          "definition": "Deploying — releasing code to environments, CI/CD execution, build pipeline operations, environment promotion, secret rotation. The deployment activity that gets code into a running state."
         },
         {
           "name": "integrating",
-          "definition": "Wiring external systems together: adapters between two libraries (e.g. MCP + LangChain), bridging APIs across boundaries, plumbing through layers. The act of connecting."
+          "definition": "Integrating external systems — wiring two libraries together (e.g. MCP + LangChain), bridging APIs across boundaries, plumbing through layers. The integration activity of connecting separate components."
         }
       ]
     },
@@ -131,7 +131,7 @@
         },
         {
           "name": "early_validation",
-          "definition": "Validating inputs at system boundaries before processing — schema checks, precondition asserts, sanitization before downstream consumption. The lesson is 'fail fast at the edge, not deep in the call stack'. Concrete signals: pydantic.parse_obj_as at API boundary, assert preconditions, normalize-on-input."
+          "definition": "Early validation at system boundaries before processing — schema validation, precondition asserts, input sanitization before downstream consumption. The lesson is 'fail fast at the edge, not deep in the call stack'. Concrete signals: pydantic.parse_obj_as at API boundary, assert preconditions, normalize-on-input checks."
         },
         {
           "name": "fallback_strategy",
@@ -143,7 +143,7 @@
         },
         {
           "name": "separation_of_concerns",
-          "definition": "Decoupling logically distinct responsibilities — control plane vs execution plane, IO vs business logic, parsing vs validation. The lesson is 'mixed responsibilities resist independent evolution'. Concrete signals: extracting adapter layer, plumbing through bus, splitting node into sub-nodes."
+          "definition": "Separation of concerns — decoupling logically distinct responsibilities (control plane vs execution plane, IO vs business logic, parsing vs validation). The lesson is 'mixed concerns resist independent evolution'. Concrete signals: extracting adapter layer, plumbing through bus, splitting node into sub-nodes."
         },
         {
           "name": "abstraction_leak",
