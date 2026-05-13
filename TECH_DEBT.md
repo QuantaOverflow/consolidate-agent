@@ -7,13 +7,20 @@ Last updated: 2026-05-13
 
 ---
 
-## 1. `expand_new_tag_coverage`: LLM keyword confusion (residual)
+## 1. `expand_new_tag_coverage`: LLM keyword confusion (residual, now auto-recoverable)
 
 **Path**: `propose/additive.py` — when propose_new adds a new tag, this
 function attaches it to already-assigned records via embedding-filter +
 LLM binary check.
 
-**Risk**: both layers can be fooled by surface keyword overlap.
+**Status**: upstream rate unchanged; **recovery path added in 2026-05-13
+refactor** (ADR-0002, Phase C). False-positive attachments now surface
+as `forced_fit_candidates` in `compute_fit_signals`, and the maintenance
+agent's `propose_refine` action sharpens the tag definition and prunes
+the misfit records automatically. Recovery latency: 1 maintenance cycle.
+
+**Risk**: both expand layers can still be fooled by surface keyword
+overlap at ingest time.
 
 **Concrete failure mode** (observed in fake-corpus iter 0, old prompt):
 - Record: `"Output token cap truncates JSON mid-string"` (LLM output token limit)
@@ -21,21 +28,30 @@ LLM binary check.
 - System said "yes, also apply rate_limiting to this record" — wrong.
 - Both contain `token / cap / limit` keywords, but the mechanisms are unrelated.
 
-**Mitigation applied** (commit pending after this doc):
-- ADDITIVE_SYSTEM prompt now lists common confusions (`token`, `limit`,
+**Mitigation in place**:
+- ADDITIVE_SYSTEM prompt lists common confusions (`token`, `limit`,
   `session`, `rotation`, `timeout`) with worked examples
 - Prompt: "prefer false when uncertain"
 - Embedding threshold 0.6 (not 0.5 — fewer surface-similar candidates)
+- **Downstream recovery**: next maintenance run picks `propose_refine`
+  on tags with mean_fit < 0.5; validated on `state_schema_design`
+  (mean_fit 0.447 → 0.496 in a single iter).
 
-**Residual risk**: prompt cannot enumerate every domain-specific confusion.
-Expected false-positive rate ~5-15% on multi-domain real data.
+**Residual risk**: prompt cannot enumerate every domain-specific
+confusion. Expected upstream false-positive rate ~5-15% on multi-domain
+real data, of which a fraction get cleaned up per maintenance cycle.
+Cycle-to-cycle drift is bounded; total contamination not.
 
 **Recommended monitoring**:
-1. After ingest run with `expand_coverage.done` events showing additions,
-   spot-check the affected records.
-2. If precision degrades, raise embedding threshold (0.6 → 0.75) or set
-   `similarity_threshold` kwarg explicitly.
-3. Long term: add a HITL review step before committing expand additions.
+1. After ingest with `expand_coverage.done` showing additions, watch
+   the next maintenance run's `forced_fit_candidates`. Affected tags
+   should surface there.
+2. If `propose_refine` keeps firing on the same tag iter after iter,
+   either expand_coverage is too aggressive (raise threshold 0.6 →
+   0.75) or that tag's definition is genuinely too vague (revisit
+   bootstrap's clustering choice).
+3. Long term: add a HITL review step before committing expand additions
+   (current refactor's HITL infra is only on the maintenance side).
 
 ---
 
@@ -325,6 +341,89 @@ graph node wiring, runner closure update.
 **Regression test**: `scripts/test_phase_b_judge_scenarios.py` (untracked)
 currently fails with `verdict=commit`. Becomes a passing assertion once
 focal signals land.
+
+---
+
+## 13. Long-tail agent paths have no real-LLM e2e coverage
+
+**Paths**: `propose_merge` / `propose_deprecate` in the agent loop;
+`judge.verdict=="rollback"` in graph context; `hitl_node` on real
+`confidence=low`.
+
+**Status**: known coverage gap from the 2026-05-13 refactor (ADR-0002).
+These paths exist in code, are unit-tested offline, but **were never
+exercised end-to-end with the real LLM** during the refactor — because
+`outputs/network.json` is healthy enough (hit_rate 0.98) that the
+diagnose LLM only ever picked `propose_refine` or `done`.
+
+**Concrete gaps**:
+
+| Path | Offline coverage | Real-LLM e2e | Why never observed |
+|---|---|---|---|
+| `propose_merge` in agent loop | unit tests in `propose/merge.py` pre-refactor; Phase B judge calibration tested via direct llm_judge | ✗ | LLM saw no high-similarity pairs needing consolidation |
+| `propose_deprecate` in agent loop | unit tests in `propose/deprecate.py` pre-refactor | ✗ | LLM saw no unused/redundant tags |
+| `judge.verdict=="rollback"` in graph | direct llm_judge with "forced test" reasoning → rollback | ✗ | No commit produced large-enough metric regression to trigger |
+| `hitl_node` with `confidence=low` | stubbed diagnose_fn → 18/18 unit pass | ✗ | Real diagnose LLM never self-reported low confidence |
+
+**Risk if real-world conditions change**:
+- After a large ingest with a new domain, network coverage may drop and
+  `propose_merge`/`deprecate` will become hot paths. Judge behavior on
+  these is unverified in agent context.
+- Phase B sensitivity gap (#12) makes the `rollback` path especially
+  important to validate empirically.
+- HITL is the *only* escape valve for low-confidence decisions; if LLM
+  versioning changes (e.g., switching to a model that reports calibrated
+  confidences), HITL will start firing and we have no real-LLM
+  observations of how it reads.
+
+**Recommended actions when paths activate**:
+1. Add focused e2e smoke scripts that synthesize unhealthy snapshots
+   (low-coverage, high-cooccur near-synonyms) and verify the agent
+   navigates them correctly.
+2. Audit judge verdict distribution across the first ≥ 10 real runs.
+   Flag if rollback rate stays at 0 — that's a false-negative signal,
+   not a healthy gate.
+3. Trigger an interactive HITL run manually (modify diagnose to
+   short-circuit confidence=low, or use the synthetic stub in
+   `scripts/test_phase_d_termination_and_hitl.py` as a model).
+
+---
+
+## 14. SqliteSaver time-travel rollback: capability exists, no documented usage
+
+**Path**: `graphs/checkpointer.py` + LangGraph's built-in
+`graph.get_state_history(config)` / `graph.update_state(config, ...)`.
+
+**Status**: every node boundary already writes a checkpoint to
+`outputs/checkpoints.db` (SqliteSaver). The capability to inspect past
+state and rewind to an earlier iter exists for free, but **there is no
+documented operator-facing walkthrough**, and no tooling around
+identifying "which checkpoint do I want to rewind to" for a given
+incident.
+
+**Why deferred** (per ADR-0002 scope discussion): empirical incidents
+that justify the walkthrough have not occurred. Current incident
+recovery path is simpler — `cp outputs/network.json.bak
+outputs/network.json` + re-run with adjusted `disabled_actions`. This
+is coarse but works for the maintenance agent's <2-minute runtimes.
+
+**When to write the walkthrough**:
+1. First time `judge.commit` is confirmed wrong post-hoc and `.bak`
+   already rolled over (TECH_DEBT #6: single-level backup), so the
+   coarse recovery isn't available.
+2. Or first time a long maintenance run (>5 iters) needs surgical
+   undo of a specific intermediate iter while keeping later iters.
+3. Or first request from an operator wanting to debug "why did the
+   agent pick X at iter 3?".
+
+**Sketch of what the walkthrough would cover**:
+- Listing checkpoints: `graph.get_state_history({"configurable":
+  {"thread_id": "<id>"}})` and identifying the iter via state["iter"].
+- Rewinding: `graph.update_state(config, {field: new_value},
+  as_node="<node_name>")` and re-invoking from that checkpoint.
+- Caveats: state-mutation invariants, what happens to reducer-
+  accumulated fields (`metrics_history`, `iter_deltas`) on rewind, and
+  how to safely drop later-iter audit events that no longer apply.
 
 ---
 
