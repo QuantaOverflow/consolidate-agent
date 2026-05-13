@@ -1,0 +1,173 @@
+{
+  "version": "v2.0-draft",
+  "drafted_at": "2026-05-13",
+  "status": "draft — pending human review at Gate 1",
+  "scheme": "faceted classification (Matter / Activity / Pattern) + lesson_type enum",
+  "notes": "definitions written to include concrete technical anchors (avoiding pure-abstract LIS-style template). Each definition starts with concrete category, lists representative technical concepts, and ends with boundary (what it is NOT).",
+
+  "facets": {
+    "matter": {
+      "description": "What technical subject the record is about. Each record gets 1-2 matter tags.",
+      "tags": [
+        {
+          "name": "llm_agent_runtime",
+          "definition": "LLM API calls (DashScope, OpenAI, Anthropic), prompt template management, model output parsing (JSON / structured output), agent tool invocation, token streaming, embedding generation. Covers chat model behavior, tool calling protocols, and any DashScope/OpenAI/Anthropic SDK usage. Boundary: not about LangGraph orchestration (use langgraph_state) — about the model and SDK layer."
+        },
+        {
+          "name": "langgraph_state",
+          "definition": "LangGraph StateGraph topology, nodes/edges definitions, state schema (TypedDict / Pydantic), reducers, checkpointers (MemorySaver / SqliteSaver), thread_id management, interrupt/Command HITL. Covers StateGraph quirks, state field merging rules, and graph compilation. Boundary: not about the LLM model itself (use llm_agent_runtime)."
+        },
+        {
+          "name": "persistence_db",
+          "definition": "SQLite/relational database operations: schema design, migrations (column add/drop/rename), INSERT/SELECT statements, transaction boundaries, DEFAULT handling, index design. Covers KnowledgeStore, sqlite3 module, schema evolution. Boundary: not about in-memory state (use langgraph_state) or file-based config (use config_env)."
+        },
+        {
+          "name": "filesystem_path",
+          "definition": "File and directory operations: path manipulation (pathlib, os.path), file existence/permission checks, symlinks vs hardlinks, glob patterns, directory traversal, atomic writes. Boundary: not about file content semantics like JSON parsing (use json_serialization)."
+        },
+        {
+          "name": "git_vcs",
+          "definition": "Git operations: commit, branch, merge (fast-forward / no-ff), rebase, stash, diff, status, gitignore semantics, pull request workflow, conventional commit conventions. Boundary: not about CI/CD pipelines on top of git (use build_deployment)."
+        },
+        {
+          "name": "testing_framework",
+          "definition": "Test framework specifics: pytest/unittest test discovery, fixture lifecycle, mocking patterns, assertion APIs, test isolation, integration test setup, coverage tools, FakeEmbeddings / test doubles. Boundary: not about the act of writing tests (use Activity:testing); this is the technical object being used."
+        },
+        {
+          "name": "http_api",
+          "definition": "HTTP request/response handling: REST endpoints, status codes (200/401/403/404), middleware execution order, authentication headers, FastAPI/Starlette/Flask routing, request lifecycle. Boundary: not about CLI command interfaces (use cli_argv)."
+        },
+        {
+          "name": "async_concurrency",
+          "definition": "Async/await semantics: asyncio event loops, asyncio.to_thread, threading.Thread, locks, race conditions, async-sync bridging, ToolNode sync requirements. Covers thread-safety, concurrent execution, and async wrapper patterns. Boundary: not about LangGraph parallelism (use langgraph_state)."
+        },
+        {
+          "name": "cli_argv",
+          "definition": "Command-line interface design: argparse/typer/click setup, flag/subcommand structure, argv parsing, stdin/stdout/stderr handling, exit codes, shell escaping. Boundary: not about scripts as orchestration scaffolding (use Activity:configuring or deploying)."
+        },
+        {
+          "name": "frontend_browser",
+          "definition": "Browser automation and rendering: Playwright/CDP page lifecycle, DOM querying, JavaScript execution, cookie/session injection, WAF detection, frontend rendering performance. Boundary: not about HTTP-level concerns (use http_api)."
+        },
+        {
+          "name": "config_env",
+          "definition": "Configuration and environment management: environment variables, .env file loading (dotenv), config files (pyproject.toml, settings.py), API keys/secrets propagation, runtime config injection. Boundary: not about deployment automation (use build_deployment)."
+        },
+        {
+          "name": "package_dependency",
+          "definition": "Package manager and dependency operations: pip/uv/poetry/npm installation, virtualenv creation, version pinning, lock files (uv.lock), pyproject.toml manipulation, dependency conflict resolution. Boundary: not about runtime imports (use Activity:configuring if about setup)."
+        },
+        {
+          "name": "json_serialization",
+          "definition": "Structured data formats: JSON/YAML/TOML parsing and generation, Pydantic models, schema validation, dict-to-JSON conversion edge cases, serialization gotchas (datetime, None, NaN). Boundary: not about LLM output as JSON (use llm_agent_runtime)."
+        },
+        {
+          "name": "logging_observability",
+          "definition": "Log emission and visibility: structured logging (JSONL events), log levels, stack trace propagation, metrics emission, telemetry, alerting infrastructure, observability gaps. Boundary: not about debugging activity (use Activity:debugging) — this is the logging mechanism itself."
+        },
+        {
+          "name": "datetime_handling",
+          "definition": "Date/time values: timezone handling (UTC, ISO 8601), date arithmetic, epoch conversion, date string parsing, time-partitioned data structures. Covers datetime module and timezone-aware comparisons. Boundary: focused on temporal correctness, not on scheduling (use Activity:deploying for cron)."
+        },
+        {
+          "name": "build_deployment",
+          "definition": "CI/CD pipelines, GitHub Actions workflows, Docker builds, Kubernetes deployments, release automation, deployment script orchestration. Boundary: not about local package management (use package_dependency)."
+        }
+      ]
+    },
+
+    "activity": {
+      "description": "What kind of engineering work was happening when the lesson surfaced. Each record gets exactly 1 activity tag.",
+      "tags": [
+        {
+          "name": "designing",
+          "definition": "Architecting new components, choosing interfaces, defining schemas, modeling state structures, deciding abstraction boundaries. The pre-implementation thinking phase."
+        },
+        {
+          "name": "debugging",
+          "definition": "Investigating unexpected behavior, tracing failures, narrowing root cause, inspecting logs/state under failure conditions. Reactive problem-solving."
+        },
+        {
+          "name": "refactoring",
+          "definition": "Restructuring existing code without changing observable behavior: extracting modules, renaming, decoupling, eliminating duplication, improving abstraction quality."
+        },
+        {
+          "name": "testing",
+          "definition": "Writing tests, designing fixtures, validating behavior under boundary conditions, integration test setup. The act of building test coverage."
+        },
+        {
+          "name": "documenting",
+          "definition": "Writing README/CONTRIBUTING/AGENTS.md/docstrings, contributor guides, ADRs, runbooks. Producing human-readable references about the system."
+        },
+        {
+          "name": "configuring",
+          "definition": "Setting up environment variables, .env files, secrets, configuration parameters, runtime flags. The act of provisioning or adjusting system configuration."
+        },
+        {
+          "name": "migrating",
+          "definition": "Moving from old to new structure: schema migrations, dependency upgrades, framework version bumps, breaking API changes. Coordinated transitions."
+        },
+        {
+          "name": "deploying",
+          "definition": "Releasing code to environments, CI/CD execution, build pipeline operations, environment promotion, secret rotation. The act of getting code into a running state."
+        },
+        {
+          "name": "integrating",
+          "definition": "Wiring external systems together: adapters between two libraries (e.g. MCP + LangChain), bridging APIs across boundaries, plumbing through layers. The act of connecting."
+        }
+      ]
+    },
+
+    "pattern": {
+      "description": "The recurring abstract lesson the record exemplifies. Each record gets 0-2 pattern tags (pattern facet is optional — some lessons are tool-discovery without a general pattern).",
+      "tags": [
+        {
+          "name": "explicit_contract",
+          "definition": "Making implicit assumptions explicit through formal interfaces, type declarations, schema contracts, named parameters. The lesson is 'replace implicit/conventional with declared/structured'. Concrete signals: TypedDict declarations, Pydantic models, named args replacing positional, explicit return types."
+        },
+        {
+          "name": "silent_failure",
+          "definition": "Failures that don't surface visibly — swallowed exceptions, unprinted stack traces, fallback paths without logging, return codes ignored. The lesson is 'make failures observable'. Concrete signals: try/except with bare pass, missing logger.error, return None on error, untracked stderr."
+        },
+        {
+          "name": "early_validation",
+          "definition": "Validating inputs at system boundaries before processing — schema checks, precondition asserts, sanitization before downstream consumption. The lesson is 'fail fast at the edge, not deep in the call stack'. Concrete signals: pydantic.parse_obj_as at API boundary, assert preconditions, normalize-on-input."
+        },
+        {
+          "name": "fallback_strategy",
+          "definition": "Graceful degradation when primary path fails — default values, alternative data sources, retry with backoff, partial success handling. The lesson is 'preserve forward progress when expected resource is unavailable'. Concrete signals: try/except fallback, default initialization on first-load, optional dependency stubs."
+        },
+        {
+          "name": "single_source_of_truth",
+          "definition": "Centralizing definitions to prevent drift — one canonical schema, one config, one authoritative store. The lesson is 'duplicate definitions inevitably diverge'. Concrete signals: extracting shared constant, derived view from source, schema-driven code generation."
+        },
+        {
+          "name": "separation_of_concerns",
+          "definition": "Decoupling logically distinct responsibilities — control plane vs execution plane, IO vs business logic, parsing vs validation. The lesson is 'mixed responsibilities resist independent evolution'. Concrete signals: extracting adapter layer, plumbing through bus, splitting node into sub-nodes."
+        },
+        {
+          "name": "abstraction_leak",
+          "definition": "Implementation details bleeding through abstraction layers — workarounds for underlying-layer quirks, breaking the abstraction's promise. The lesson is 'the abstraction is hiding less than it claims'. Concrete signals: needing to drop down to raw API, abstraction-bypass workarounds, missing edge case in wrapper."
+        }
+      ]
+    }
+  },
+
+  "lesson_type": {
+    "description": "The polarity/type of the lesson. Each record gets exactly 1 lesson_type. This is an enum field, not a tag facet.",
+    "values": [
+      {
+        "name": "anti_pattern",
+        "definition": "What NOT to do. A mistake, fragile approach, or naive solution that causes failures. The record's tone is 'don't / avoid / never / breaks'. Examples: 'Mocking the DB hides migration failures', 'Hand-crafting plist XML is error-prone'."
+      },
+      {
+        "name": "discovery",
+        "definition": "A surprising or non-obvious behavior of a tool, framework, or system. The lesson is the discovery itself, documenting how something actually works (often contrary to expectation). Examples: 'StateGraph silently drops unknown keys', 'fast-forward merge creates no commit'."
+      },
+      {
+        "name": "best_practice",
+        "definition": "A recommended approach or correct way to handle X. The record's tone is 'should / prefer / use Y'. Examples: 'asyncio.to_thread for blocking IO', 'plistlib over string templating'."
+      }
+    ]
+  }
+}
