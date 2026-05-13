@@ -1,23 +1,19 @@
-"""Maintenance agent: facade over the LangGraph StateGraph.
+"""Maintenance agent: facade over the LangGraph StateGraph (Phase E).
 
-Public types (AgentState, FinalStatus, IterationRecord, Agent) are
-backward-compatible with the pre-graph implementation. Internally
-Agent.run() builds and invokes a StateGraph from .graphs.agent.
+Public types (AgentState, FinalStatus, IterationRecord, Agent) wrap the
+plan-and-execute StateGraph in .graphs.agent. Each `agent.run()` invocation:
 
-Per iteration:
-  1. measure (reverse_check) → diagnostics, assignments
-  2. diagnose → next_action + focus
-  3. if done → stop
-  4. propose_X(focus) → proposals
-  5. apply proposals → new vocab/assignments
-  6. verify hit_rate (anti-regression) → keep or rollback
-  7. record history, loop
+  1. measure (reverse_check) → initial diagnostics, assignments, metrics
+  2. planner (rules-based) → ordered work queue from signal probes
+  3. loop:
+       pop item → propose (LLM) → apply (invariant-guarded) → re-measure
+       → sanity_check (pure) → commit/rollback → record
+  4. terminate when queue empty or max_iter
 
 Stop conditions (FinalStatus):
-  - completed: diagnose returns done
+  - completed: work queue exhausted
   - max_iter_exhausted: iter >= max_iter
-  - no_actions_remaining: all 3 ACTIONS in blocked_actions
-  - fatal_error: unexpected exception during diagnose
+  - fatal_error: unexpected exception during propose/apply
 """
 from __future__ import annotations
 
@@ -28,27 +24,24 @@ from pathlib import Path
 from typing import Callable
 
 
-ACTIONS = ("propose_new", "propose_merge", "propose_deprecate", "propose_refine")
-
-
 class FinalStatus(str, Enum):
     COMPLETED = "completed"
     MAX_ITER_EXHAUSTED = "max_iter_exhausted"
-    NO_ACTIONS_REMAINING = "no_actions_remaining"
-    CONVERGED = "converged"  # Phase D: last 2 iters' max-abs-delta < 0.005
     FATAL_ERROR = "fatal_error"
 
 
 @dataclass
 class IterationRecord:
     iter: int
-    action: str                 # 'done' / 'propose_X' / 'blocked' / 'unknown_action' / ''
-    decision: dict | None       # diagnose output
+    action: str
+    focus: str
+    work_item_reason: str = ""
     proposals: list = field(default_factory=list)
     hit_rate_before: float = 0.0
     hit_rate_after: float = 0.0
-    result: str = ""            # 'completed' / 'applied' / 'rolled_back' / 'blocked_empty' / 'apply_error' / 'fatal_error' / 'blocked' / 'unknown_action'
-    blocked_actions_after: list = field(default_factory=list)
+    result: str = ""            # 'applied' / 'rolled_back' / 'blocked_empty' / 'apply_error' / 'unknown_action' / 'propose_error'
+    sanity_verdict: str = ""    # 'commit' / 'rollback'
+    sanity_reason: str = ""
     error: str | None = None
 
 
@@ -58,8 +51,8 @@ class AgentState:
     assignments: list[dict]
     diagnostics: dict
     iter: int = 0
-    blocked_actions: set[str] = field(default_factory=set)
     history: list[IterationRecord] = field(default_factory=list)
+    work_queue_remaining: list[dict] = field(default_factory=list)
 
 
 def _hit_rate(diagnostics: dict) -> float:
@@ -70,74 +63,43 @@ def _hit_rate(diagnostics: dict) -> float:
 
 
 class Agent:
-    """Maintenance agent. Public contract identical to pre-graph version.
+    """Maintenance agent — plan-and-execute facade.
 
-    Internally compiles a LangGraph StateGraph (.graphs.agent.build_agent_graph)
-    and drives it via graph.invoke(). State transitions are equivalent to the
-    previous pure-Python while-loop.
-
-    measure_fn signature contract:
+    measure_fn signature:
         measure_fn(
             vocab,
             *,
-            action: str | None,                 # None on initial call; 'propose_*' post-apply
+            action: str | None,                 # None on initial; 'propose_*' post-apply
             current_assignments: list[dict] | None,
             previous_assignments: list[dict] | None,
         ) -> tuple[diagnostics_dict, assignments_list]
 
-    diagnose_fn signature contract:
-        diagnose_fn(vocab, diagnostics, assignments, *, blocked_actions=[]) -> dict
-            Returns either {"decision": {...}} or the decision dict directly.
+    health_fn signature:
+        health_fn(vocab, assignments) -> HealthMetrics
+
+    propose_fns: dict mapping action name → fn(vocab, assignments, focus) -> list
+    db_path: passed through to the planner for `compute_fit_signals`.
     """
 
     def __init__(
         self,
         measure_fn: Callable[..., tuple[dict, list[dict]]],
-        diagnose_fn: Callable[..., dict],
         propose_fns: dict[str, Callable[..., list]],
+        health_fn: Callable,
+        db_path: Path,
         max_iter: int = 5,
         disabled_actions: set[str] | frozenset[str] | None = None,
         checkpoint_db: Path | None = None,
-        health_fn: Callable | None = None,
-        judge_fn: Callable | None = None,
+        sanity_threshold: float = 0.10,
     ):
         self.measure_fn = measure_fn
-        self.diagnose_fn = diagnose_fn
         self.propose_fns = propose_fns
-        self.max_iter = max_iter
-        # Permanently-blocked actions (e.g., maintenance disables propose_new
-        # because the growth path lives in ingest_batch, not in the agent loop).
-        self.disabled_actions: set[str] = set(disabled_actions or ())
-        # Optional persistent checkpoint backend; None → MemorySaver.
-        self.checkpoint_db: Path | None = checkpoint_db
-        # Phase A: optional health_fn(vocab, assignments) -> HealthMetrics.
-        # When provided, 5-dim metrics flow into metrics_history + iter_deltas.
         self.health_fn = health_fn
-        # Phase B: optional judge_fn (LLM-as-judge). Replaces hit_rate gate.
-        # Requires health_fn for the before/after metrics it consumes.
-        self.judge_fn = judge_fn
-
-    @staticmethod
-    def _invoke_with_batch_hitl(graph, payload, config) -> dict:
-        """Drive graph.invoke with auto-approve on HITL interrupts.
-
-        Batch mode (runner scripts): every confidence=low escalation is
-        resolved with `Command(resume="approve")` and logged. Interactive
-        HITL (stdin prompt or external callback) is out of scope for
-        Phase D — tests exercise the actual interrupt flow by calling
-        build_agent_graph + graph.invoke(Command(...)) directly.
-        """
-        from langgraph.types import Command
-
-        from .observability import get_default_logger
-
-        result = graph.invoke(payload, config)
-        while result.get("__interrupt__"):
-            logger = get_default_logger()
-            logger.event("agent.hitl.auto_approve",
-                         reason="batch mode — Agent.run defaults to approve")
-            result = graph.invoke(Command(resume="approve"), config)
-        return result
+        self.db_path = db_path
+        self.max_iter = max_iter
+        self.disabled_actions: set[str] = set(disabled_actions or ())
+        self.checkpoint_db: Path | None = checkpoint_db
+        self.sanity_threshold = sanity_threshold
 
     def run(
         self,
@@ -156,9 +118,7 @@ class Agent:
             "disabled_actions": list(self.disabled_actions),
             "run_id": thread_id,
         }
-
-        # Recursion limit: each iter walks 4-6 nodes; allow 6 × max_iter + buffer.
-        invoke_config = {**config, "recursion_limit": max(50, 6 * self.max_iter + 20)}
+        invoke_config = {**config, "recursion_limit": max(50, 8 * self.max_iter + 20)}
 
         if self.checkpoint_db is None:
             from langgraph.checkpoint.memory import MemorySaver
@@ -166,36 +126,37 @@ class Agent:
             graph = build_agent_graph(
                 cp,
                 measure_fn=self.measure_fn,
-                diagnose_fn=self.diagnose_fn,
                 propose_fns=self.propose_fns,
                 health_fn=self.health_fn,
-                judge_fn=self.judge_fn,
+                db_path=self.db_path,
+                sanity_threshold=self.sanity_threshold,
             )
-            result = self._invoke_with_batch_hitl(graph, initial_state, invoke_config)
+            result = graph.invoke(initial_state, invoke_config)
         else:
             from .graphs.checkpointer import sqlite_checkpointer
             with sqlite_checkpointer(self.checkpoint_db) as cp:
                 graph = build_agent_graph(
                     cp,
                     measure_fn=self.measure_fn,
-                    diagnose_fn=self.diagnose_fn,
                     propose_fns=self.propose_fns,
                     health_fn=self.health_fn,
-                    judge_fn=self.judge_fn,
+                    db_path=self.db_path,
+                    sanity_threshold=self.sanity_threshold,
                 )
-                result = self._invoke_with_batch_hitl(graph, initial_state, invoke_config)
+                result = graph.invoke(initial_state, invoke_config)
 
-        # Convert dict state → dataclass for backward compat.
         history = [
             IterationRecord(
                 iter=rec["iter"],
                 action=rec.get("action", ""),
-                decision=rec.get("decision"),
+                focus=rec.get("focus", ""),
+                work_item_reason=rec.get("work_item_reason", ""),
                 proposals=rec.get("proposals", []),
                 hit_rate_before=rec.get("hit_rate_before", 0.0),
                 hit_rate_after=rec.get("hit_rate_after", 0.0),
                 result=rec.get("result", ""),
-                blocked_actions_after=rec.get("blocked_actions_after", []),
+                sanity_verdict=rec.get("sanity_verdict", ""),
+                sanity_reason=rec.get("sanity_reason", ""),
                 error=rec.get("error"),
             )
             for rec in result.get("history", [])
@@ -205,8 +166,8 @@ class Agent:
             assignments=result["assignments"],
             diagnostics=result["diagnostics"],
             iter=result.get("iter", 0),
-            blocked_actions=set(result.get("blocked_actions", [])),
             history=history,
+            work_queue_remaining=list(result.get("work_queue") or []),
         )
         status = FinalStatus(result.get("final_status", "fatal_error"))
         return state, status

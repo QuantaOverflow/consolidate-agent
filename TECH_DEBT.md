@@ -278,7 +278,21 @@ frequency keep risk acceptable.
 
 ---
 
-## 12. LLM-as-judge: aggregate metrics under-detect small-fraction bad merges
+## 12. ~~LLM-as-judge: aggregate metrics under-detect small-fraction bad merges~~ — OBSOLETE (Phase E)
+
+**Status update (2026-05-13, ADR-0003)**: Phase E removed `llm_judge` entirely
+in favor of `planner.sanity_check_metrics` — a pure-fn rollback gate that
+fires only on catastrophic regression (≥ 10% drop on any monitored dim).
+The per-action calibration sensitivity problem described below no longer
+applies. Subtle bad commits are now an *accepted* trade-off, recovered via
+next-cycle `forced_fit` signal + `propose_refine` cleanup. See ADR-0003
+"Consequences — Negative" for the explicit trade-off acknowledgement.
+
+**Original entry kept below for historical context:**
+
+---
+
+## 12 (historical). LLM-as-judge: aggregate metrics under-detect small-fraction bad merges
 
 **Path**: `judge.py` — `llm_judge`
 

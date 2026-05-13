@@ -1,10 +1,11 @@
-"""End-to-end agent runner with real LLM workflows.
+"""End-to-end agent runner — plan-and-execute (Phase E).
 
 Wires together vocab_maintenance package components:
   - measure (reverse_check) — parallel 10
-  - diagnose (probe-driven reviewer)
-  - propose.new / propose.merge / propose.deprecate
+  - planner (rules-based; in-process inside the graph)
+  - propose.merge / propose.deprecate / propose.refine
   - apply_proposal (invariant-checked)
+  - sanity_check_metrics (pure-fn rollback gate)
 
 Usage:
     uv run python scripts/run_agent_e2e.py [--max-iter N] [--sample-size N]
@@ -19,9 +20,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
 from consolidate_agent.vocab_maintenance.agent import Agent, FinalStatus
-from consolidate_agent.vocab_maintenance.diagnose import diagnose as diagnose_call
 from consolidate_agent.vocab_maintenance.health import measure_health
-from consolidate_agent.vocab_maintenance.judge import llm_judge
 from consolidate_agent.vocab_maintenance.measure import (
     build_diagnostics,
     load_records,
@@ -97,11 +96,6 @@ def build_measure_fn(
     return measure_fn
 
 
-def diagnose_fn(vocab, diagnostics, assignments, **kwargs):
-    db = BASE / "outputs/knowledge.db"
-    return diagnose_call(vocab, diagnostics, assignments, db, **kwargs)
-
-
 def build_health_fn(db_path: Path):
     """Closure capturing db_path so the graph layer doesn't need to know it."""
     def health_fn(vocab: list[dict], assignments: list[dict]):
@@ -113,8 +107,7 @@ def build_propose_fns(db_path: Path):
     """Maintenance agent's tool kit: merge + deprecate + refine.
 
     propose_new is intentionally absent — vocab growth belongs to ingest_batch,
-    not to the maintenance loop. Maintenance is consolidation-only.
-    propose_refine sharpens a tag's definition + prunes <=10 misfit records.
+    not the maintenance loop.
     """
     return {
         "propose_merge": lambda v, a, f: propose_merge_fn(v, a, f, db_path=db_path),
@@ -194,12 +187,11 @@ def main():
 
         agent = Agent(
             measure_fn=measure_fn,
-            diagnose_fn=diagnose_fn,
             propose_fns=propose_fns,
+            health_fn=build_health_fn(args.db),
+            db_path=args.db,
             max_iter=args.max_iter,
             disabled_actions={"propose_new"},  # growth handled by ingest_batch
-            health_fn=build_health_fn(args.db),
-            judge_fn=llm_judge,
         )
 
         t0 = time.perf_counter()
@@ -222,18 +214,18 @@ def main():
         print(f"iters:  {state.iter}")
         print(f"elapsed: {elapsed:.1f}s ({elapsed/60:.1f} min)")
         print(f"vocab:  {initial_vocab_size} → {len(state.vocab)} tags")
-        print(f"blocked actions: {sorted(state.blocked_actions)}")
+        print(f"queue remaining: {len(state.work_queue_remaining)} item(s)")
         print(f"network saved → {args.network}")
         print()
         print("History:")
         for rec in state.history:
-            print(f"  iter {rec.iter}: action={rec.action}  result={rec.result}  "
-                  f"hit_rate {rec.hit_rate_before:.2f}→{rec.hit_rate_after:.2f}  "
-                  f"proposals={len(rec.proposals)}  blocked_after={rec.blocked_actions_after}")
+            print(f"  iter {rec.iter}: action={rec.action}  focus={rec.focus[:50]}  "
+                  f"result={rec.result}  hit_rate {rec.hit_rate_before:.2f}→{rec.hit_rate_after:.2f}  "
+                  f"proposals={len(rec.proposals)}  sanity={rec.sanity_verdict}")
             if rec.error:
                 print(f"    error: {rec.error}")
-            if rec.decision and rec.decision.get("action_focus"):
-                print(f"    focus: {rec.decision['action_focus'][:120]}")
+            if rec.work_item_reason:
+                print(f"    why: {rec.work_item_reason[:120]}")
 
         # Run report (audit trail; the canonical state lives in --network)
         report = {
@@ -242,7 +234,7 @@ def main():
             "elapsed_seconds": round(elapsed, 1),
             "initial_vocab_size": initial_vocab_size,
             "final_vocab_size": len(state.vocab),
-            "blocked_actions": sorted(state.blocked_actions),
+            "queue_remaining": state.work_queue_remaining,
             "history": serialize_state_history(state.history),
         }
         (args.output_dir / "agent_run_report.json").write_text(

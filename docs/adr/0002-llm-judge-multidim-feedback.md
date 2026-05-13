@@ -1,7 +1,7 @@
 # ADR 0002 — Maintenance agent feedback loop: 5-dim metrics + LLM-as-judge + refine action
 
 - **Date**: 2026-05-13
-- **Status**: Accepted
+- **Status**: **Partially Superseded by ADR-0003 (2026-05-13)** — Phase A (5-dim HealthMetrics + iter_deltas reducer) and Phase C (`propose_refine` action + invariants) are RETAINED. Phase B (LLM-as-judge) and Phase D (convergence rule + HITL) are SUPERSEDED by the plan-and-execute redesign in ADR-0003 (`planner.build_work_queue` + `sanity_check_metrics`). See ADR-0003 for the rationale and what carried over.
 - **Component**: `vocab_maintenance.{health, judge, propose.refine, graphs.agent}` — the maintenance agent's gate, diagnose memory, and repair vocabulary
 
 ## Context

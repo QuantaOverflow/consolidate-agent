@@ -56,15 +56,14 @@ class BootstrapState(TypedDict, total=False):
 
 
 class AgentLoopState(TypedDict, total=False):
-    """State for the maintenance agent loop.
+    """State for the maintenance agent loop (Phase E — plan-and-execute).
 
-    Loop topology:
-      START → initial_measure → check_termination →─ diagnose → route_action
-                                       ↑                            │
-                                       │                            ↓
-                                       └─ {applied, rolled_back, blocked_empty, unknown, apply_error}
-                                                                    │
-                                                                    └─→ done → END
+    Topology (Phase E):
+      START → initial_measure → plan_work_queue → check_continue:
+        queue empty -> finalize_completed
+        iter >= max -> finalize_terminate
+        else -> pop_item -> propose -> apply -> post_apply_measure ->
+                sanity_check -> commit/rollback -> record_iter -> check_continue
     """
     # Inputs
     initial_vocab: list
@@ -77,28 +76,26 @@ class AgentLoopState(TypedDict, total=False):
     vocab: list
     assignments: list
     diagnostics: dict
-    blocked_actions: list                 # serialized set
     history: list                         # IterationRecord dicts
+    work_queue: list                      # Phase E: list of WorkItem dicts; popped each iter
+    current_item: dict                    # Phase E: the WorkItem being processed this iter
 
     # Per-iter scratch
-    decision: dict
     action: str
     focus: str
     proposals: list                       # serialized proposals
     new_vocab: list
     new_assignments: list
     new_diag: dict
-    new_metrics: dict                     # Phase B: post-apply 5-dim metrics, consumed by judge + commit
-    judge_verdict: str                    # Phase B: "commit" / "rollback" / "unsure"
-    judge_reasoning: str                  # Phase B: judge's free-text explanation
-    judge_confidence: str                 # Phase B: "high" / "medium" / "low"
-    hitl_resolved: bool                   # Phase D: set after hitl_node handled an escalation, prevents re-routing back to hitl
+    new_metrics: dict                     # post-apply 5-dim metrics
+    sanity_verdict: str                   # "commit" | "rollback" (pure-fn output)
+    sanity_reason: str                    # 1-line explanation
     rec: dict                             # current iter record being assembled
-    iter_result: str                      # "applied" / "blocked" / etc, set per node
+    iter_result: str                      # "applied" / "rolled_back" / "apply_error" / "blocked_empty"
 
     # Termination
     final_status: str                     # FinalStatus.value
 
-    # Phase A — multi-dim health history (bounded reducers).
+    # Bounded health-trajectory accumulators
     metrics_history: Annotated[list, _append_last_n(_KEEP_N)]   # [{iter, metrics}]
-    iter_deltas: Annotated[list, _append_last_n(_KEEP_N)]        # [{iter, action, result, delta}]
+    iter_deltas: Annotated[list, _append_last_n(_KEEP_N)]        # [{iter, action, focus, result, delta, sanity}]

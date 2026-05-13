@@ -1,4 +1,4 @@
-"""Agent loop as a LangGraph StateGraph.
+"""Agent loop as a LangGraph StateGraph — plan-and-execute (Phase E).
 
 Topology:
   START
@@ -7,40 +7,60 @@ Topology:
   initial_measure
     │
     ↓
-  termination_check ────────────── (max_iter / no_actions_remaining) ──→ END
+  plan_work_queue            (rules-based; no LLM)
     │
     ↓
-  diagnose
-    │
-    ↓
-  route_action ──── done ────→ finalize_completed ──→ END
-                ──── blocked ──→ record_iter ──┐
-                ──── unknown ──→ record_iter ──┤
-                ──── propose_X ──→ propose ──→ route_proposals ─── empty ──→ record_iter ──┤
-                                                              └─ has  ──→ apply ──→ route_apply
-                                                                                          │
-                                                                                          ├─ error ──→ record_iter ──┤
-                                                                                          └─ ok ────→ post_apply ──→ llm_judge ──→ route_judge
-                                                                                                                                              │
-                                                                                                                                              ├─ rollback → record_iter ─┤
-                                                                                                                                              └─ commit  → record_iter ─┤
-                                                                                                                                                            │
-                                                                                                                                                            ↓
-                                                                                                                                          termination_check (next iter)
+  check_continue ──── queue_empty ──→ finalize_completed ──→ END
+                ──── max_iter ──→ finalize_terminate ──→ END
+                ──── continue ──┐
+                                ↓
+                              pop_item
+                                │
+                                ↓
+                              propose
+                                │
+                                ↓
+                          (proposals empty → record_iter)
+                                │
+                                ↓
+                              apply
+                                │
+                          (apply_error → record_iter)
+                                │
+                                ↓
+                              post_apply_measure
+                                │
+                                ↓
+                              sanity_check       (pure fn; no LLM)
+                                │
+                              ┌─┴────────┐
+                              ↓          ↓
+                          commit     rollback
+                              │          │
+                              └────┬─────┘
+                                   ↓
+                              record_iter
+                                   │
+                                   ↓
+                              check_continue (loop)
 
-Persistence: every node boundary is a SqliteSaver checkpoint, so crash-then-
-resume picks up at the last completed node.
+What Phase E removes from Phase A-D:
+  - LLM diagnose: rules-based planner emits a full work queue at the start.
+  - LLM-as-judge: pure `sanity_check_metrics` rolls back only on catastrophic
+    regression (any monitored dim drops >= 10%). No LLM per-iter call.
+  - Convergence rule: max_iter + queue exhaustion are the only termination
+    signals (FATAL_ERROR still applies on exceptions).
+  - HITL escape: with no LLM judgment loop there is no `confidence=low`
+    signal to escalate on. Removed.
 
-Equivalence to the prior pure-Python Agent class: state transitions are
-identical; only the orchestration substrate changed.
+Per-iter LLM calls drop from ~4 (plan + decide + propose + judge) to 1
+(propose). The vocab-maintenance loop becomes deterministic-modulo-propose.
 """
 from __future__ import annotations
 
-from dataclasses import asdict
 from typing import Any, Callable
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import interrupt
 
 from ..apply import (
     InvalidProposal,
@@ -50,10 +70,10 @@ from ..apply import (
 )
 from ..network import emit_apply_event
 from ..observability import get_default_logger
+from ..planner import WorkItem, build_work_queue, sanity_check_metrics
 from .state import AgentLoopState
 
 
-ACTIONS = ("propose_new", "propose_merge", "propose_deprecate", "propose_refine")
 _DIM_NAMES = ("coverage", "coherence", "distinctness", "granularity", "multi_axis")
 _ZERO_DELTA = {k: 0.0 for k in _DIM_NAMES}
 
@@ -62,23 +82,6 @@ def _last_metrics(state: dict) -> dict[str, float]:
     """Most recent metrics snapshot from metrics_history; empty when disabled."""
     hist = state.get("metrics_history") or []
     return hist[-1]["metrics"] if hist else {}
-
-
-def is_converged(iter_deltas: list[dict], threshold: float = 0.005) -> bool:
-    """Phase D: True iff the last 2 iter_deltas both show max-abs delta < threshold.
-
-    Pure function — exposed at module level so tests can exercise it
-    without standing up the whole graph.
-    """
-    if len(iter_deltas) < 2:
-        return False
-    for entry in iter_deltas[-2:]:
-        d = entry.get("delta") or {}
-        if not d:
-            return False
-        if max(abs(v) for v in d.values()) >= threshold:
-            return False
-    return True
 
 
 def _diff_metrics(new: dict[str, float], prior: dict[str, float]) -> dict[str, float]:
@@ -98,12 +101,14 @@ def _new_iter_record(iter_idx: int, hit_before: float) -> dict:
     return {
         "iter": iter_idx,
         "action": "",
-        "decision": None,
+        "focus": "",
+        "work_item_reason": "",
         "proposals": [],
         "hit_rate_before": hit_before,
         "hit_rate_after": 0.0,
         "result": "",
-        "blocked_actions_after": [],
+        "sanity_verdict": "",
+        "sanity_reason": "",
         "error": None,
     }
 
@@ -112,32 +117,27 @@ def build_agent_graph(
     checkpointer: Any,
     *,
     measure_fn: Callable,
-    diagnose_fn: Callable,
     propose_fns: dict[str, Callable],
     health_fn: Callable | None = None,
-    judge_fn: Callable | None = None,
+    db_path: Any = None,
+    sanity_threshold: float = 0.10,
 ):
-    """Compile the maintenance agent StateGraph with the given checkpointer.
+    """Compile the maintenance agent StateGraph (Phase E plan-and-execute).
 
     measure_fn(vocab, *, action=None, current_assignments=None,
                previous_assignments=None) -> (diag, assignments)
-    diagnose_fn(vocab, diagnostics, assignments, *, blocked_actions=[],
-                iter_deltas=[]) -> dict
-        Returns either {"decision": {...}} or the decision dict directly.
-        iter_deltas is rendered as a history table in PLAN_USER from iter 2+.
     propose_fns: dict mapping action name → fn(vocab, assignments, focus) -> list
     health_fn(vocab, assignments) -> HealthMetrics
-        Computes the 5-dim metrics. Required when judge_fn is supplied.
-        Disabled when None (legacy / unit tests) — falls back to the
-        pre-Phase-A no-metrics behavior plus the old hit_rate gate.
-    judge_fn(action, proposals, reasoning, before_metrics, after_metrics,
-             before_vocab_size, after_vocab_size) -> JudgeVerdict (optional)
-        When provided, replaces the hit_rate-threshold regression gate with
-        LLM-as-judge. Verdict drives commit/rollback routing and is recorded
-        in iter_deltas. Conservative bias on LLM failure → commit.
-
-    Config values (max_iter, disabled_actions) come from the initial state.
+        Computes 5-dim metrics for the planner's signals (forced_fit) and
+        for sanity_check. Required.
+    db_path: passed to the planner so it can run `compute_fit_signals`.
+    sanity_threshold: catastrophic regression bound. Any monitored dim
+        dropping by >= this triggers rollback. Default 0.10 (10%).
     """
+    if health_fn is None:
+        raise ValueError("Phase E requires health_fn — planner and sanity_check both need 5-dim metrics")
+    if db_path is None:
+        raise ValueError("Phase E requires db_path — planner runs compute_fit_signals which needs it")
 
     # ── Nodes ────────────────────────────────────────────────────────────
 
@@ -160,114 +160,106 @@ def build_agent_graph(
             disabled_actions=sorted(disabled),
             max_iter=state.get("max_iter", 5),
         )
-        out: dict = {
+        health = health_fn(vocab, assignments)
+        metrics = health.to_dict()
+        logger.event("metrics.measured", iter=0, **metrics)
+        return {
             "vocab": list(vocab),
             "assignments": list(assignments),
             "diagnostics": diag,
             "iter": 0,
-            "blocked_actions": disabled,  # start with disabled actions pre-blocked
             "history": [],
+            "metrics_history": [{"iter": 0, "metrics": metrics}],
+            "iter_deltas": [],
         }
-        if health_fn is not None:
-            health = health_fn(vocab, assignments)
-            metrics = health.to_dict()
-            logger.event("metrics.measured", iter=0, **metrics)
-            out["metrics_history"] = [{"iter": 0, "metrics": metrics}]
-            out["iter_deltas"] = []
-        return out
 
-    def termination_check_node(state: AgentLoopState) -> dict:
-        """Set final_status if any termination condition holds; else no-op.
+    def plan_work_queue_node(state: AgentLoopState) -> dict:
+        """Rules-based planner: scan signals once, emit prioritized work queue."""
+        logger = get_default_logger()
+        disabled = set(state.get("disabled_actions", []))
+        queue = build_work_queue(
+            state["vocab"],
+            state["assignments"],
+            state["diagnostics"],
+            db_path,
+            disabled_actions=disabled,
+        )
+        logger.event(
+            "planner.done",
+            queue_size=len(queue),
+            actions=[w.action for w in queue],
+            items=[w.to_dict() for w in queue],
+        )
+        return {"work_queue": [w.to_dict() for w in queue]}
 
-        Phase D adds convergence: if the last 2 iter_deltas both show
-        max-abs delta across all 5 dims < 0.005, the agent has nothing
-        productive left to do — terminate with status=converged.
-        """
+    def check_continue_node(state: AgentLoopState) -> dict:
+        """Decide whether to keep looping. Sets final_status if not."""
         if state.get("final_status"):
-            # Already set (e.g., fatal_error from diagnose) — keep.
             return {}
         if state["iter"] >= state.get("max_iter", 5):
             return {"final_status": "max_iter_exhausted"}
-        # Convergence is checked BEFORE no_actions_remaining so a stable
-        # network exits with the more informative "converged" status even
-        # when all actions happen to be blocked simultaneously.
-        if is_converged(state.get("iter_deltas") or []):
-            return {"final_status": "converged"}
-        blocked = set(state.get("blocked_actions", []))
-        if blocked.issuperset(ACTIONS):
-            return {"final_status": "no_actions_remaining"}
+        if not state.get("work_queue"):
+            return {"final_status": "completed"}
         return {}
 
-    def diagnose_node(state: AgentLoopState) -> dict:
+    def pop_item_node(state: AgentLoopState) -> dict:
+        """Pop the next WorkItem and bootstrap a fresh per-iter record."""
         logger = get_default_logger()
+        queue = list(state.get("work_queue") or [])
+        item = queue.pop(0)
         new_iter = state["iter"] + 1
         rec = _new_iter_record(new_iter, _hit_rate(state["diagnostics"]))
+        rec["action"] = item["action"]
+        rec["focus"] = item["focus"]
+        rec["work_item_reason"] = item.get("reason", "")
         logger.event(
             "agent.iter.start",
             iter=new_iter,
-            hit_rate=round(rec["hit_rate_before"], 4),
-            blocked=sorted(state.get("blocked_actions", [])),
-        )
-        try:
-            diag_result = diagnose_fn(
-                state["vocab"],
-                state["diagnostics"],
-                state["assignments"],
-                blocked_actions=sorted(state.get("blocked_actions", [])),
-                iter_deltas=list(state.get("iter_deltas", [])),
-            )
-        except Exception as e:
-            # Fatal error — record + halt.
-            import traceback as _tb
-            rec["result"] = "fatal_error"
-            rec["error"] = f"{type(e).__name__}: {e}"
-            rec["blocked_actions_after"] = sorted(state.get("blocked_actions", []))
-            logger.event("agent.iter.done", iter=new_iter, action="", result="fatal_error",
-                         error=rec["error"], traceback=_tb.format_exc()[:1000])
-            return {
-                "iter": new_iter,
-                "rec": rec,
-                "iter_result": "fatal_error",
-                "final_status": "fatal_error",
-            }
-        decision = (
-            diag_result.get("decision")
-            if isinstance(diag_result, dict) and "decision" in diag_result
-            else diag_result
-        )
-        action = decision["next_action"]
-        focus = decision.get("action_focus", "")
-        rec["decision"] = decision
-        logger.event(
-            "agent.iter.diagnose.done",
-            iter=new_iter, action=action, focus=focus[:120],
-            confidence=decision.get("confidence"),
+            action=item["action"],
+            focus=item["focus"],
+            reason=item.get("reason", ""),
+            queue_remaining=len(queue),
         )
         return {
             "iter": new_iter,
+            "work_queue": queue,
+            "current_item": item,
             "rec": rec,
-            "decision": decision,
-            "action": action,
-            "focus": focus,
+            "action": item["action"],
+            "focus": item["focus"],
         }
 
     def propose_node(state: AgentLoopState) -> dict:
         action = state["action"]
-        proposals = propose_fns[action](state["vocab"], state["assignments"], state.get("focus", ""))
-        # Keep raw dataclass instances in rec for backward compat with
-        # downstream code that does asdict(IterationRecord(...)).
+        if action not in propose_fns:
+            # Unknown action in queue — record + skip.
+            rec = dict(state["rec"])
+            rec["result"] = "unknown_action"
+            rec["error"] = f"unknown action: {action}"
+            return {"proposals": [], "rec": rec}
+        try:
+            proposals = propose_fns[action](
+                state["vocab"], state["assignments"], state.get("focus", ""),
+            )
+        except Exception as e:  # noqa: BLE001 — propose LLM may raise; isolate
+            logger = get_default_logger()
+            import traceback as _tb
+            logger.event(
+                "propose.error",
+                iter=state["iter"], action=action,
+                error_type=type(e).__name__, error=str(e)[:200],
+                traceback=_tb.format_exc()[:1000],
+            )
+            rec = dict(state["rec"])
+            rec["result"] = "propose_error"
+            rec["error"] = f"{type(e).__name__}: {e}"
+            return {"proposals": [], "rec": rec}
         rec = dict(state["rec"])
-        rec["action"] = action
         rec["proposals"] = list(proposals)
         return {"proposals": list(proposals), "rec": rec}
 
     def apply_node(state: AgentLoopState) -> dict:
-        """Apply each proposal independently. Partial success is acceptable.
-
-        Previously this was all-or-nothing: any failure rolled back the entire
-        batch including innocent proposals. Now each proposal is tried in its
-        own try/except. The action is only blocked if EVERY proposal failed.
-        """
+        """Apply each proposal independently. Partial success is acceptable."""
         logger = get_default_logger()
         cur_vocab, cur_assignments = state["vocab"], state["assignments"]
         successes: list = []
@@ -276,7 +268,7 @@ def build_agent_graph(
         run_id = state.get("run_id", "")
         action = state.get("action", "")
         actor = f"agent:{action}" if action else "agent"
-        reasoning = (state.get("decision") or {}).get("reasoning", "") or ""
+        reasoning = state.get("current_item", {}).get("reason", "")
 
         for p in state["proposals"]:
             before_vocab = list(cur_vocab)
@@ -291,11 +283,12 @@ def build_agent_graph(
                 )
             except (InvalidProposal, OrphanError) as e:
                 failures.append((p, e))
-                logger.event("apply.proposal_skipped",
-                             iter=state["iter"], action=state["action"],
-                             error_type=type(e).__name__, error=str(e)[:200])
+                logger.event(
+                    "apply.proposal_skipped",
+                    iter=state["iter"], action=action,
+                    error_type=type(e).__name__, error=str(e)[:200],
+                )
 
-        # All failed → traditional apply_error path (block action for this run)
         if not successes:
             rec = dict(state["rec"])
             rec["result"] = "apply_error"
@@ -305,113 +298,64 @@ def build_agent_graph(
                 f"{type(first_err).__name__}: {first_err}"
             )
             rec["hit_rate_after"] = rec["hit_rate_before"]
-            blocked = list(state.get("blocked_actions", []))
-            if state["action"] not in blocked:
-                blocked.append(state["action"])
-            rec["blocked_actions_after"] = sorted(blocked)
-            logger.event("agent.iter.done", iter=state["iter"], action=state["action"],
-                         result="apply_error", error=rec["error"],
-                         attempts=len(state["proposals"]))
-            out: dict = {"rec": rec, "iter_result": "apply_error", "blocked_actions": blocked}
-            if health_fn is not None:
-                out["iter_deltas"] = [{
-                    "iter": state["iter"], "action": state["action"],
-                    "result": "apply_error", "delta": dict(_ZERO_DELTA),
-                }]
-            return out
+            logger.event(
+                "agent.iter.done", iter=state["iter"], action=action,
+                result="apply_error", error=rec["error"], attempts=len(state["proposals"]),
+            )
+            return {"rec": rec, "iter_result": "apply_error"}
 
-        # At least one succeeded → commit the partial result.
         check_invariants(cur_vocab, cur_assignments)
         if failures:
-            print(f"  [apply] {len(successes)}/{len(state['proposals'])} succeeded; "
-                  f"{len(failures)} skipped (invariant violations)", flush=True)
-            logger.event("apply.partial_success",
-                         iter=state["iter"], action=state["action"],
-                         succeeded=len(successes), failed=len(failures))
+            print(
+                f"  [apply] {len(successes)}/{len(state['proposals'])} succeeded; "
+                f"{len(failures)} skipped (invariant violations)",
+                flush=True,
+            )
+            logger.event(
+                "apply.partial_success",
+                iter=state["iter"], action=action,
+                succeeded=len(successes), failed=len(failures),
+            )
         return {"new_vocab": cur_vocab, "new_assignments": cur_assignments}
 
     def post_apply_measure_node(state: AgentLoopState) -> dict:
-        """Re-compute diagnostics + 5-dim metrics after a successful apply.
-
-        Metrics are computed here (not in commit_node) so the judge sees the
-        post-apply state before deciding commit/rollback.
-        """
         new_diag, new_assignments2 = measure_fn(
             state["new_vocab"],
             action=state["action"],
             current_assignments=state["new_assignments"],
             previous_assignments=state["assignments"],
         )
+        new_metrics = health_fn(state["new_vocab"], new_assignments2).to_dict()
         rec = dict(state["rec"])
         rec["hit_rate_after"] = _hit_rate(new_diag)
-        out: dict = {
+        return {
             "new_diag": new_diag,
             "new_assignments": new_assignments2,
+            "new_metrics": new_metrics,
             "rec": rec,
         }
-        if health_fn is not None:
-            new_metrics = health_fn(state["new_vocab"], new_assignments2).to_dict()
-            out["new_metrics"] = new_metrics
-        return out
 
-    def llm_judge_node(state: AgentLoopState) -> dict:
-        """LLM-as-judge: decide commit/rollback/unsure based on metric deltas.
-
-        Conservative: 'unsure' routes to commit; only 'rollback' reverts.
-        Disabled (verdict="commit") when judge_fn is None — old hit_rate gate
-        falls through via route_judge.
-        """
+    def sanity_check_node(state: AgentLoopState) -> dict:
+        """Pure-fn gate: rollback only on catastrophic regression."""
         logger = get_default_logger()
-        if judge_fn is None or health_fn is None:
-            # No judge configured: act as a no-op that commits.
-            return {
-                "judge_verdict": "commit",
-                "judge_reasoning": "(judge disabled)",
-                "judge_confidence": "low",
-            }
         before = _last_metrics(state)
         after = state.get("new_metrics") or {}
-        try:
-            verdict = judge_fn(
-                action=state["action"],
-                proposals=list(state.get("proposals", [])),
-                reasoning=(state.get("decision") or {}).get("reasoning", ""),
-                before_metrics=before,
-                after_metrics=after,
-                before_vocab_size=len(state["vocab"]),
-                after_vocab_size=len(state["new_vocab"]),
-            )
-        except Exception as e:  # noqa: BLE001 — judge LLM failures must not crash the loop
-            import traceback as _tb
-            logger.event("judge.error", iter=state["iter"], action=state["action"],
-                         error_type=type(e).__name__, error=str(e)[:200],
-                         traceback=_tb.format_exc()[:1000])
-            verdict = None
-        if verdict is None:
-            return {
-                "judge_verdict": "commit",
-                "judge_reasoning": "judge exception — defaulting to commit",
-                "judge_confidence": "low",
-            }
-        logger.event(
-            f"judge.{verdict.verdict}",
-            iter=state["iter"], action=state["action"],
-            confidence=verdict.confidence,
-            primary_concern=verdict.primary_concern[:200],
-            reasoning=verdict.reasoning[:400],
+        verdict, reason = sanity_check_metrics(
+            before, after, catastrophic_threshold=sanity_threshold,
         )
-        return {
-            "judge_verdict": verdict.verdict,
-            "judge_reasoning": verdict.reasoning,
-            "judge_confidence": verdict.confidence,
-        }
+        logger.event(
+            f"sanity.{verdict}",
+            iter=state["iter"], action=state.get("action", ""),
+            reason=reason,
+        )
+        return {"sanity_verdict": verdict, "sanity_reason": reason}
 
     def commit_node(state: AgentLoopState) -> dict:
-        """Judge said commit (or unsure → conservative commit) → adopt new state."""
         logger = get_default_logger()
         rec = dict(state["rec"])
         rec["result"] = "applied"
-        rec["blocked_actions_after"] = sorted(state.get("blocked_actions", []))
+        rec["sanity_verdict"] = state.get("sanity_verdict", "commit")
+        rec["sanity_reason"] = state.get("sanity_reason", "")
         logger.event(
             "agent.iter.done",
             iter=state["iter"], action=state["action"], result="applied",
@@ -419,295 +363,152 @@ def build_agent_graph(
             vocab_size_after=len(state["new_vocab"]),
             hit_rate_before=round(rec["hit_rate_before"], 4),
             hit_rate_after=round(rec["hit_rate_after"], 4),
-            judge_verdict=state.get("judge_verdict", ""),
+            sanity_reason=state.get("sanity_reason", ""),
         )
-        out: dict = {
+        new_metrics = state.get("new_metrics") or {}
+        prior = _last_metrics(state)
+        delta = _diff_metrics(new_metrics, prior)
+        logger.event("metrics.measured", iter=state["iter"], **new_metrics)
+        return {
             "vocab": state["new_vocab"],
             "assignments": state["new_assignments"],
             "diagnostics": state["new_diag"],
             "rec": rec,
             "iter_result": "applied",
-        }
-        if health_fn is not None:
-            new_metrics = state.get("new_metrics") or {}
-            prior = _last_metrics(state)
-            delta = _diff_metrics(new_metrics, prior)
-            logger.event("metrics.measured", iter=state["iter"], **new_metrics)
-            out["metrics_history"] = [{"iter": state["iter"], "metrics": new_metrics}]
-            out["iter_deltas"] = [{
+            "metrics_history": [{"iter": state["iter"], "metrics": new_metrics}],
+            "iter_deltas": [{
                 "iter": state["iter"], "action": state["action"],
-                "result": "applied", "delta": delta,
-                "judge_verdict": state.get("judge_verdict", ""),
-                "judge_reasoning": (state.get("judge_reasoning") or "")[:240],
-            }]
-        return out
+                "focus": state.get("focus", ""), "result": "applied",
+                "delta": delta, "sanity_verdict": state.get("sanity_verdict", "commit"),
+            }],
+        }
 
     def rollback_node(state: AgentLoopState) -> dict:
         logger = get_default_logger()
         rec = dict(state["rec"])
         rec["result"] = "rolled_back"
-        blocked = list(state.get("blocked_actions", []))
-        if state["action"] not in blocked:
-            blocked.append(state["action"])
-        rec["blocked_actions_after"] = sorted(blocked)
+        rec["sanity_verdict"] = state.get("sanity_verdict", "rollback")
+        rec["sanity_reason"] = state.get("sanity_reason", "")
         logger.event(
-            "agent.iter.done", iter=state["iter"], action=state["action"], result="rolled_back",
+            "agent.iter.done", iter=state["iter"], action=state["action"],
+            result="rolled_back",
             hit_rate_before=round(rec["hit_rate_before"], 4),
             hit_rate_after=round(rec["hit_rate_after"], 4),
-            judge_verdict=state.get("judge_verdict", ""),
+            sanity_reason=state.get("sanity_reason", ""),
         )
-        out: dict = {"rec": rec, "iter_result": "rolled_back", "blocked_actions": blocked}
-        if health_fn is not None:
-            # state reverts → delta is zero against prior snapshot; judge fields recorded.
-            out["iter_deltas"] = [{
+        return {
+            "rec": rec,
+            "iter_result": "rolled_back",
+            "iter_deltas": [{
                 "iter": state["iter"], "action": state["action"],
-                "result": "rolled_back", "delta": dict(_ZERO_DELTA),
-                "judge_verdict": state.get("judge_verdict", ""),
-                "judge_reasoning": (state.get("judge_reasoning") or "")[:240],
-            }]
-        return out
+                "focus": state.get("focus", ""), "result": "rolled_back",
+                "delta": dict(_ZERO_DELTA),
+                "sanity_verdict": "rollback",
+            }],
+        }
 
     def record_iter_node(state: AgentLoopState) -> dict:
-        """Append the current iter record to history."""
+        """Append iter record to history; clear per-iter scratch."""
         rec = dict(state["rec"])
-        if rec.get("result") in ("blocked", "unknown_action", "blocked_empty"):
-            # These rec.result values were set by upstream router/scratch nodes.
-            pass
         history = list(state.get("history", []))
         history.append(rec)
         return {"history": history, "rec": {}}
 
-    def _no_op_iter_delta(iter_idx: int, action: str, result: str) -> dict:
-        return {"iter": iter_idx, "action": action, "result": result, "delta": dict(_ZERO_DELTA)}
-
-    def handle_blocked_node(state: AgentLoopState) -> dict:
-        logger = get_default_logger()
-        action = state["action"]
-        rec = dict(state["rec"])
-        rec["action"] = action
-        rec["result"] = "blocked"
-        rec["hit_rate_after"] = rec["hit_rate_before"]
-        rec["blocked_actions_after"] = sorted(state.get("blocked_actions", []))
-        logger.event("agent.iter.done", iter=state["iter"], action=action, result="blocked")
-        out: dict = {"rec": rec, "iter_result": "blocked"}
-        if health_fn is not None:
-            out["iter_deltas"] = [_no_op_iter_delta(state["iter"], action, "blocked")]
-        return out
-
-    def handle_unknown_node(state: AgentLoopState) -> dict:
-        logger = get_default_logger()
-        action = state["action"]
-        rec = dict(state["rec"])
-        rec["action"] = action
-        rec["result"] = "unknown_action"
-        rec["error"] = f"unknown action: {action}"
-        blocked = list(state.get("blocked_actions", []))
-        if action not in blocked:
-            blocked.append(action)
-        rec["blocked_actions_after"] = sorted(blocked)
-        logger.event("agent.iter.done", iter=state["iter"], action=action,
-                     result="unknown_action", error=rec["error"])
-        out: dict = {"rec": rec, "iter_result": "unknown_action", "blocked_actions": blocked}
-        if health_fn is not None:
-            out["iter_deltas"] = [_no_op_iter_delta(state["iter"], action, "unknown_action")]
-        return out
-
-    def handle_blocked_empty_node(state: AgentLoopState) -> dict:
-        logger = get_default_logger()
-        action = state["action"]
-        rec = dict(state["rec"])
-        rec["result"] = "blocked_empty"
-        rec["hit_rate_after"] = rec["hit_rate_before"]
-        blocked = list(state.get("blocked_actions", []))
-        if action not in blocked:
-            blocked.append(action)
-        rec["blocked_actions_after"] = sorted(blocked)
-        logger.event("agent.iter.done", iter=state["iter"], action=action, result="blocked_empty")
-        out: dict = {"rec": rec, "iter_result": "blocked_empty", "blocked_actions": blocked}
-        if health_fn is not None:
-            out["iter_deltas"] = [_no_op_iter_delta(state["iter"], action, "blocked_empty")]
-        return out
-
-    def hitl_node(state: AgentLoopState) -> dict:
-        """Phase D: HITL escalation when diagnose decision is confidence=low.
-
-        Calls `interrupt()` to pause the graph. Caller resumes with
-        `Command(resume="approve")` (continue with proposed action) or
-        `Command(resume="reject")` (force action=done). Any other value is
-        conservatively treated as reject.
-        """
-        logger = get_default_logger()
-        decision = state.get("decision") or {}
-        logger.event(
-            "agent.iter.hitl.escalate",
-            iter=state["iter"],
-            proposed_action=state.get("action", ""),
-            confidence=decision.get("confidence", ""),
-            uncertainty=decision.get("uncertainty_reasons", []),
-        )
-        user_input = interrupt({
-            "iter": state["iter"],
-            "proposed_action": state.get("action", ""),
-            "focus": state.get("focus", ""),
-            "reasoning": decision.get("reasoning", ""),
-            "uncertainty_reasons": decision.get("uncertainty_reasons", []),
-            "instruction": "Respond with 'approve' to continue or 'reject' to force done.",
-        })
-        if user_input == "approve":
-            logger.event("agent.iter.hitl.resume", iter=state["iter"], decision="approve")
-            return {"hitl_resolved": True}
-        logger.event("agent.iter.hitl.resume", iter=state["iter"],
-                     decision=("reject" if user_input == "reject" else f"unknown:{user_input!r}"))
-        return {"hitl_resolved": True, "action": "done"}
-
-    def finalize_done_node(state: AgentLoopState) -> dict:
-        logger = get_default_logger()
-        rec = dict(state["rec"])
-        rec["action"] = "done"
-        rec["result"] = "completed"
-        rec["hit_rate_after"] = rec["hit_rate_before"]
-        rec["blocked_actions_after"] = sorted(state.get("blocked_actions", []))
-        history = list(state.get("history", []))
-        history.append(rec)
-        logger.event("agent.iter.done", iter=state["iter"], action="done", result="completed")
-        logger.event("agent.run.done", status="completed",
-                     iters=state["iter"], vocab_size=len(state["vocab"]))
-        return {"history": history, "final_status": "completed"}
-
     def finalize_terminate_node(state: AgentLoopState) -> dict:
         logger = get_default_logger()
         status = state.get("final_status") or "max_iter_exhausted"
-        if status == "max_iter_exhausted":
-            logger.event("agent.run.done", status="max_iter_exhausted",
-                         iters=state["iter"], vocab_size=len(state["vocab"]))
-        elif status == "no_actions_remaining":
-            logger.event("agent.run.done", status="no_actions_remaining",
-                         iters=state["iter"], vocab_size=len(state["vocab"]))
-        else:
-            logger.event("agent.run.done", status=status,
-                         iters=state["iter"], vocab_size=len(state["vocab"]))
+        logger.event(
+            "agent.run.done",
+            status=status,
+            iters=state["iter"], vocab_size=len(state["vocab"]),
+            queue_remaining=len(state.get("work_queue") or []),
+        )
         return {"final_status": status}
 
     # ── Routing functions ────────────────────────────────────────────────
 
-    def route_termination(state: AgentLoopState) -> str:
-        return "terminate" if state.get("final_status") else "diagnose"
+    def route_continue(state: AgentLoopState) -> str:
+        return "terminate" if state.get("final_status") else "pop"
 
-    def route_action(state: AgentLoopState) -> str:
-        if state.get("iter_result") == "fatal_error":
-            return "terminate"
-        action = state["action"]
-        if action == "done":
-            return "done"
-        # Phase D: HITL escape on confidence=low — unless already resolved.
-        decision = state.get("decision") or {}
-        if decision.get("confidence") == "low" and not state.get("hitl_resolved"):
-            return "hitl"
-        if action in set(state.get("blocked_actions", [])):
-            return "blocked"
-        if action not in propose_fns:
-            return "unknown"
-        return "propose"
-
-    def route_proposals(state: AgentLoopState) -> str:
+    def route_after_propose(state: AgentLoopState) -> str:
+        rec = state.get("rec") or {}
+        if rec.get("result") in ("unknown_action", "propose_error"):
+            return "record"
         return "apply" if state.get("proposals") else "blocked_empty"
 
-    def route_apply(state: AgentLoopState) -> str:
+    def route_after_apply(state: AgentLoopState) -> str:
         return "post_apply" if state.get("iter_result") != "apply_error" else "record"
 
-    def route_judge(state: AgentLoopState) -> str:
-        """Route on the judge's verdict. 'unsure' is conservative → commit."""
-        return "rollback" if state.get("judge_verdict") == "rollback" else "commit"
+    def route_after_sanity(state: AgentLoopState) -> str:
+        return "rollback" if state.get("sanity_verdict") == "rollback" else "commit"
+
+    def handle_blocked_empty_node(state: AgentLoopState) -> dict:
+        logger = get_default_logger()
+        rec = dict(state["rec"])
+        rec["result"] = "blocked_empty"
+        rec["hit_rate_after"] = rec["hit_rate_before"]
+        logger.event(
+            "agent.iter.done", iter=state["iter"], action=state.get("action", ""),
+            result="blocked_empty",
+        )
+        return {
+            "rec": rec,
+            "iter_result": "blocked_empty",
+            "iter_deltas": [{
+                "iter": state["iter"], "action": state.get("action", ""),
+                "focus": state.get("focus", ""), "result": "blocked_empty",
+                "delta": dict(_ZERO_DELTA),
+                "sanity_verdict": "",
+            }],
+        }
 
     # ── Wire ──────────────────────────────────────────────────────────────
 
     g = StateGraph(AgentLoopState)
 
     g.add_node("initial_measure", initial_measure_node)
-    g.add_node("termination_check", termination_check_node)
-    g.add_node("diagnose", diagnose_node)
+    g.add_node("plan_work_queue", plan_work_queue_node)
+    g.add_node("check_continue", check_continue_node)
+    g.add_node("pop_item", pop_item_node)
     g.add_node("propose", propose_node)
     g.add_node("apply", apply_node)
     g.add_node("post_apply_measure", post_apply_measure_node)
-    g.add_node("llm_judge", llm_judge_node)
+    g.add_node("sanity_check", sanity_check_node)
     g.add_node("commit", commit_node)
     g.add_node("rollback", rollback_node)
-    g.add_node("handle_blocked", handle_blocked_node)
-    g.add_node("handle_unknown", handle_unknown_node)
     g.add_node("handle_blocked_empty", handle_blocked_empty_node)
-    g.add_node("hitl", hitl_node)
     g.add_node("record_iter", record_iter_node)
-    g.add_node("finalize_done", finalize_done_node)
     g.add_node("finalize_terminate", finalize_terminate_node)
 
     g.add_edge(START, "initial_measure")
-    g.add_edge("initial_measure", "termination_check")
-
+    g.add_edge("initial_measure", "plan_work_queue")
+    g.add_edge("plan_work_queue", "check_continue")
     g.add_conditional_edges(
-        "termination_check",
-        route_termination,
-        {"diagnose": "diagnose", "terminate": "finalize_terminate"},
+        "check_continue",
+        route_continue,
+        {"pop": "pop_item", "terminate": "finalize_terminate"},
     )
-
-    g.add_conditional_edges(
-        "diagnose",
-        route_action,
-        {
-            "done": "finalize_done",
-            "blocked": "handle_blocked",
-            "unknown": "handle_unknown",
-            "propose": "propose",
-            "terminate": "finalize_terminate",
-            "hitl": "hitl",
-        },
-    )
-
-    # After HITL, re-enter route_action with hitl_resolved=True so the
-    # confidence=low branch doesn't loop.
-    g.add_conditional_edges(
-        "hitl",
-        route_action,
-        {
-            "done": "finalize_done",
-            "blocked": "handle_blocked",
-            "unknown": "handle_unknown",
-            "propose": "propose",
-            "terminate": "finalize_terminate",
-            "hitl": "hitl",  # defensive — should never re-enter
-        },
-    )
-
+    g.add_edge("pop_item", "propose")
     g.add_conditional_edges(
         "propose",
-        route_proposals,
-        {"apply": "apply", "blocked_empty": "handle_blocked_empty"},
+        route_after_propose,
+        {"apply": "apply", "blocked_empty": "handle_blocked_empty", "record": "record_iter"},
     )
-
     g.add_conditional_edges(
         "apply",
-        route_apply,
+        route_after_apply,
         {"post_apply": "post_apply_measure", "record": "record_iter"},
     )
-
-    g.add_edge("post_apply_measure", "llm_judge")
+    g.add_edge("post_apply_measure", "sanity_check")
     g.add_conditional_edges(
-        "llm_judge",
-        route_judge,
+        "sanity_check",
+        route_after_sanity,
         {"commit": "commit", "rollback": "rollback"},
     )
-
-    # Handlers that record then loop back
-    g.add_edge("handle_blocked", "record_iter")
-    g.add_edge("handle_unknown", "record_iter")
-    g.add_edge("handle_blocked_empty", "record_iter")
     g.add_edge("commit", "record_iter")
     g.add_edge("rollback", "record_iter")
-    g.add_edge("record_iter", "termination_check")  # ← the loop edge
-
-    # Terminal nodes
-    g.add_edge("finalize_done", END)
+    g.add_edge("handle_blocked_empty", "record_iter")
+    g.add_edge("record_iter", "check_continue")
     g.add_edge("finalize_terminate", END)
 
-    # Set max recursion limit higher than the per-iter node count × max_iter
-    # to allow long loops without LangGraph's default 25 limit kicking in.
     return g.compile(checkpointer=checkpointer)
