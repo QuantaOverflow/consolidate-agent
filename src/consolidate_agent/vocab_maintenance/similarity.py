@@ -2,6 +2,7 @@
 
 Used to surface suspected near-synonym pairs to the diagnostic agent.
 Pure deterministic — embedding cache keyed by definition text.
+Uses text-embedding-v4 to match the model used for stored record embeddings.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from dashscope import TextEmbedding
 
 
 @lru_cache(maxsize=4096)
-def _embed(text: str, model: str = "text-embedding-v3") -> tuple[float, ...]:
+def _embed(text: str, model: str = "text-embedding-v4") -> tuple[float, ...]:
     """Get embedding via DashScope. Cached per text.
 
     Retries with exponential backoff + jitter on transient throttling
