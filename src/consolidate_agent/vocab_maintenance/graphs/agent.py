@@ -113,6 +113,49 @@ def _new_iter_record(iter_idx: int, hit_before: float) -> dict:
     }
 
 
+_DEGRADATION_THRESHOLD = 0.3
+_FAILURE_RESULTS = frozenset({"propose_error", "apply_error", "unknown_action"})
+_VALID_RESULTS = frozenset({
+    "applied", "blocked_empty", "rolled_back",
+    "propose_error", "apply_error", "unknown_action",
+})
+
+
+def compute_run_summary(history: list[dict]) -> dict:
+    """Aggregate iter history into run-level statistics."""
+    counts: dict[str, int] = {k: 0 for k in _VALID_RESULTS}
+    for rec in history:
+        r = rec.get("result", "")
+        if r in _VALID_RESULTS:
+            counts[r] += 1
+    processed = sum(counts.values())
+    failure_count = sum(counts[k] for k in _FAILURE_RESULTS)
+    failure_rate = failure_count / processed if processed > 0 else 0.0
+    return {
+        "applied": counts["applied"],
+        "blocked_empty": counts["blocked_empty"],
+        "rolled_back": counts["rolled_back"],
+        "apply_error": counts["apply_error"],
+        "propose_error": counts["propose_error"],
+        "unknown_action": counts["unknown_action"],
+        "processed": processed,
+        "failure_rate": failure_rate,
+    }
+
+
+def decide_final_status(
+    termination_cause: str,
+    summary: dict,
+    threshold: float = _DEGRADATION_THRESHOLD,
+) -> str:
+    """Determine final_status from termination cause and run summary."""
+    if summary["processed"] == 0:
+        return "completed"
+    if summary["failure_rate"] >= threshold:
+        return "degraded"
+    return termination_cause
+
+
 def build_agent_graph(
     checkpointer: Any,
     *,
@@ -416,14 +459,17 @@ def build_agent_graph(
 
     def finalize_terminate_node(state: AgentLoopState) -> dict:
         logger = get_default_logger()
-        status = state.get("final_status") or "max_iter_exhausted"
+        termination_cause = state.get("final_status") or "max_iter_exhausted"
+        summary = compute_run_summary(state.get("history", []))
+        status = decide_final_status(termination_cause, summary)
         logger.event(
             "agent.run.done",
             status=status,
             iters=state["iter"], vocab_size=len(state["vocab"]),
             queue_remaining=len(state.get("work_queue") or []),
+            **{k: (round(v, 4) if k == "failure_rate" else v) for k, v in summary.items()},
         )
-        return {"final_status": status}
+        return {"final_status": status, "run_summary": summary}
 
     # ── Routing functions ────────────────────────────────────────────────
 

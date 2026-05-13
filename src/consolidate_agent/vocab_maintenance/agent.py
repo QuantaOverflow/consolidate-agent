@@ -13,6 +13,7 @@ plan-and-execute StateGraph in .graphs.agent. Each `agent.run()` invocation:
 Stop conditions (FinalStatus):
   - completed: work queue exhausted
   - max_iter_exhausted: iter >= max_iter
+  - degraded: failure_rate >= threshold (silent degradation guard)
   - fatal_error: unexpected exception during propose/apply
 """
 from __future__ import annotations
@@ -26,6 +27,7 @@ from typing import Callable
 
 class FinalStatus(str, Enum):
     COMPLETED = "completed"
+    DEGRADED = "degraded"
     MAX_ITER_EXHAUSTED = "max_iter_exhausted"
     FATAL_ERROR = "fatal_error"
 
@@ -53,6 +55,7 @@ class AgentState:
     iter: int = 0
     history: list[IterationRecord] = field(default_factory=list)
     work_queue_remaining: list[dict] = field(default_factory=list)
+    run_summary: dict = field(default_factory=dict)
 
 
 def _hit_rate(diagnostics: dict) -> float:
@@ -168,6 +171,7 @@ class Agent:
             iter=result.get("iter", 0),
             history=history,
             work_queue_remaining=list(result.get("work_queue") or []),
+            run_summary=result.get("run_summary", {}),
         )
         status = FinalStatus(result.get("final_status", "fatal_error"))
         return state, status

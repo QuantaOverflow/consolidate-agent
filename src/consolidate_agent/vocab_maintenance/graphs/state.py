@@ -95,6 +95,7 @@ class AgentLoopState(TypedDict, total=False):
 
     # Termination
     final_status: str                     # FinalStatus.value
+    run_summary: dict                     # populated by finalize_terminate_node
 
     # Bounded health-trajectory accumulators
     metrics_history: Annotated[list, _append_last_n(_KEEP_N)]   # [{iter, metrics}]
