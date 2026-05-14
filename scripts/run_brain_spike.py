@@ -17,8 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from consolidate_agent.config import Settings
-from consolidate_agent.vocab_maintenance.agent_brain.brain import run_brain_loop
-from consolidate_agent.vocab_maintenance.agent_brain.tools import BrainContext
+from consolidate_agent.vocab_maintenance.agent_brain.graph import run_brain_graph
 from consolidate_agent.vocab_maintenance.observability import RunLogger, set_default_logger
 
 GOLDEN_PATH = Path(__file__).parent.parent / "tests/fixtures/golden_80.jsonl"
@@ -149,18 +148,13 @@ def main() -> None:
     logger = RunLogger(trace_path)
     set_default_logger(logger)
 
-    context = BrainContext(
+    print(f"\nStarting brain graph (max_rounds={args.max_rounds})...")
+    t_start = time.perf_counter()
+
+    result = run_brain_graph(
         db_path=db_path,
         vocab=vocab,
         assignments=assignments,
-        golden=golden,
-    )
-
-    print(f"\nStarting brain loop (max_rounds={args.max_rounds})...")
-    t_start = time.perf_counter()
-
-    result = run_brain_loop(
-        context,
         max_rounds=args.max_rounds,
         max_tools_per_round=5,
         cost_cap_calls=60,
