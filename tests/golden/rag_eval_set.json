@@ -1,0 +1,442 @@
+[
+  {
+    "session_id": "019d2947-be27-7fd0-92e9-27b8c2295b31",
+    "record_id": "knowledge_0f849b23d279",
+    "title": "Domain validation for browser fetch must use hostname, not URL prefix",
+    "insight": "Using page.url.startswith('https://xueqiu.com') to gate browser fetch requests fails on valid xueqiu subdomains (e.g., www.xueqiu.com, m.xueqiu.com) and causes unnecessary navigation overhead. The correct check is host-based (page.urlparse().hostname), which handles all subdomains uniformly and avoids false negatives/positives. This subtlety is invisible in docs and only emerges when testing across real-world domain variations.",
+    "evidence_turns": [
+      2,
+      3
+    ]
+  },
+  {
+    "session_id": "019d2947-be27-7fd0-92e9-27b8c2295b31",
+    "record_id": "knowledge_1fe721edbaea",
+    "title": "Browser-side fetch requires explicit timeout handling in Playwright",
+    "insight": "Playwright's page.evaluate(fetch(...)) does not inherit the timeout behavior of context.request.get(). Without an explicit AbortController or outer asyncio.wait_for, a hanging fetch can block the entire async task indefinitely, leading to silent hangs rather than actionable errors. This is a non-obvious behavioral divergence that cannot be inferred from Playwright docs alone.",
+    "evidence_turns": [
+      1,
+      2,
+      3
+    ]
+  },
+  {
+    "session_id": "019d2947-be27-7fd0-92e9-27b8c2295b31",
+    "record_id": "knowledge_34527ae2fd35",
+    "title": "Payload structure inconsistency across error paths breaks downstream assumptions",
+    "insight": "Even unused fields (e.g., 'ok', 'url', 'contentType') in fallback exception payloads create silent coupling: if one code path returns {'status', 'text'} and another returns {'ok', 'status', 'url', 'text', 'contentType'}, future refactoring or debugging becomes fragile — e.g., a new logging layer might expect 'url' and crash on missing key. Consistency must be enforced at *all* entry points, including exceptions, even when fields are currently ignored.",
+    "evidence_turns": [
+      1,
+      2,
+      4
+    ]
+  },
+  {
+    "session_id": "019d2947-be27-7fd0-92e9-27b8c2295b31",
+    "record_id": "knowledge_aa8c99487bf6",
+    "title": "WAF detection must distinguish JS Challenge from UI-based CAPTCHA at the signal level",
+    "insight": "Treating all WAF responses (e.g., aliyun_waf_* HTML) as 'CAPTCHA_REQUIRED' leads to false positives and incorrect recovery paths. True operational robustness requires distinguishing between client-executed JS challenges (which require navigation + wait) and visible DOM-based CAPTCHAs (which require human interaction). This distinction emerged only after observing real traffic and adding diagnostic logging — it's not derivable from documentation.",
+    "evidence_turns": [
+      5,
+      6
+    ]
+  },
+  {
+    "session_id": "019d2947-be27-7fd0-92e9-27b8c2295b31",
+    "record_id": "knowledge_afb3a23f6748",
+    "title": "Interrupt recovery logic must be observable and source-attributed",
+    "insight": "Blind 'CAPTCHA_REQUIRED' interrupts without source attribution (DOM vs response body vs no-progress) make debugging impossible. Adding structured 'source' fields to interrupt payloads and printing them at the point of interruption transformed ambiguous failures into actionable diagnostics — revealing that what looked like 'sliders' were actually JS challenges, and vice versa.",
+    "evidence_turns": [
+      5,
+      6
+    ]
+  },
+  {
+    "session_id": "019d2947-be27-7fd0-92e9-27b8c2295b31",
+    "record_id": "knowledge_ec46b50ae423",
+    "title": "Browser-side fetch requires explicit timeout via AbortController",
+    "insight": "Playwright's page.evaluate(fetch(...)) does not inherit the timeout semantics of context.request.get(). Without manual AbortController setup, network hangs (e.g., stalled TLS handshake, server silence) cause indefinite blocking — breaking retry logic and observability. This is non-obvious because developers assume 'fetch' in browser context inherits Playwright's timeout model, but it doesn't: the timeout must be implemented in JavaScript, not passed from Python.",
+    "evidence_turns": [
+      1,
+      2,
+      3
+    ]
+  },
+  {
+    "session_id": "019d4ba0-6a44-7273-a103-81241262e516",
+    "record_id": "knowledge_13db42b00f54",
+    "title": "Tool fallback requires LLM-driven parsing, not local heuristics",
+    "insight": "When a tool returns unstructured output (e.g., raw HTML table), simply switching to it is insufficient for AC compliance — the agent must use *another LLM call* to parse that output into the required structured schema. Local post-processing (e.g., regex or key-based extraction) fails when structure is dynamic or ambiguous; only LLM-based semantic parsing generalizes across tool outputs. This was discovered through repeated failure of AC1b despite correct tool switching: the system switched to playwright but couldn't extract `main_net_inflow` from its raw output until a second LLM invocation was added to interpret it.",
+    "evidence_turns": [
+      8,
+      9,
+      10
+    ]
+  },
+  {
+    "session_id": "019d4ba0-6a44-7273-a103-81241262e516",
+    "record_id": "knowledge_18bfcd49a0e7",
+    "title": "Cross-process browser state invalidates live-smoke assumptions",
+    "insight": "Browser sessions initialized in one Python process (e.g., via `main.py`) are not accessible in subsequent subprocesses (e.g., `python -c \"...\"`), even if using the same `browser_manager`. This breaks live-smoke tests that assume shared browser context across invocations—requiring all browser-dependent steps (login, navigation, tool execution) to run within the *same process and event loop* to preserve page handles and cookies.",
+    "evidence_turns": [
+      10
+    ]
+  },
+  {
+    "session_id": "019d4ba0-6a44-7273-a103-81241262e516",
+    "record_id": "knowledge_6cccb67e221d",
+    "title": "LLM tool loops must handle both tool_calls and content-based results in same flow",
+    "insight": "A robust LLM tool-calling loop cannot treat `tool_calls` and `content` as mutually exclusive branches. Real-world LLMs (e.g., qwen-plus) sometimes return structured JSON *in content* (e.g., ```json {\"main_net_inflow\": 1.0}```) instead of `tool_calls`, especially after fallback or when confidence is high. The loop must parse and validate `content` for target fields *before* concluding no tool was used — otherwise it falsely declares exhaustion and returns null. This was uncovered when AC1b kept failing with `retrieval_exhausted: True` even after playwright succeeded, because the code ignored valid JSON in `content`.",
+    "evidence_turns": [
+      8,
+      9,
+      10
+    ]
+  },
+  {
+    "session_id": "019d4ba0-6a44-7273-a103-81241262e516",
+    "record_id": "knowledge_89356ed79e52",
+    "title": "Tool fallback requires LLM-driven parsing, not just tool switching",
+    "insight": "Simply switching from a failed primary tool (e.g., akshare) to a secondary tool (e.g., Playwright) is insufficient for structured data extraction. When the secondary tool returns raw HTML/table/text without pre-parsed fields, the agent must invoke the LLM *again*—with explicit parsing instructions and schema—to extract target fields (e.g., main_net_inflow). This 'parse-after-fetch' step is not implied by tool registration or call routing; it must be explicitly implemented in the orchestration logic.",
+    "evidence_turns": [
+      8,
+      9,
+      10
+    ]
+  },
+  {
+    "session_id": "019d4ba0-6a44-7273-a103-81241262e516",
+    "record_id": "knowledge_c4ae87612dd3",
+    "title": "LLM tool-calling orchestration must distinguish between 'tool selection' and 'tool result interpretation'",
+    "insight": "A common misconception is that implementing `tool_calls` handling fulfills 'LLM autonomy'. In reality, true autonomy requires two distinct phases: (1) LLM selects a tool based on input, and (2) LLM interprets the *raw output* of that tool to produce final structured output. Many implementations conflate these—e.g., hardcoding fallback logic or expecting tools to return ready-to-use dicts—leading to silent failures when outputs don’t match expectations.",
+    "evidence_turns": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ]
+  },
+  {
+    "session_id": "019d491d-5edc-7633-884e-2023f0978576",
+    "record_id": "knowledge_08710ca8fecf",
+    "title": "Multi-source fallback chains require empirical stability profiling before production use",
+    "insight": "A fallback chain with multiple external data sources (e.g., akshare → CNInfo → 10jqka) is only as robust as its *least stable* layer — and stability cannot be assumed from documentation or interface signatures. This session shows that layers which appear logically sound (e.g., akshare's stock_individual_info_em) failed 100% of the time in the target environment due to proxy/network issues, while seemingly 'riskier' layers (e.g., direct HTML scraping of 10jqka) were stable. The insight is that fallback design must be driven by runtime diagnostics — not theoretical coverage — and that 'complexity' should be measured in observed failure rates, not line count or source count.",
+    "evidence_turns": [
+      14,
+      17,
+      31,
+      32
+    ]
+  },
+  {
+    "session_id": "019d491d-5edc-7633-884e-2023f0978576",
+    "record_id": "knowledge_5313d55d1bec",
+    "title": "Conventional Commits are insufficient for capturing cross-file architectural intent",
+    "insight": "The git-commit-workflow skill correctly generated a conventional commit message ('feat(nodes): add epic5 multi-source analysis nodes'), but it omitted critical context: the *architectural coupling* between new nodes (e.g., synthesize_insights requiring sentiment_score from Epic2) and the *intentional decoupling* (e.g., fetch_theme’s strict concept validation to avoid false positives). Conventional Commits describe *what changed*, not *why the change was structured that way*. In systems with layered dependencies (Epic1→Epic2→Epic5), omitting this rationale makes future maintenance harder — especially when reviewers lack session context.",
+    "evidence_turns": []
+  },
+  {
+    "session_id": "019d491d-5edc-7633-884e-2023f0978576",
+    "record_id": "knowledge_bce4cab17dfa",
+    "title": "Test-driven development exposes implicit coupling earlier than integration testing",
+    "insight": "Epic5’s unit tests passed immediately upon node creation (turn 1), but the *integration-level coupling* — e.g., synthesize_insights needing sentiment_score from Epic2 — only surfaced during end-to-end runs (turn 2, 7). Crucially, the tests didn’t fail; they just silently skipped the missing field, masking the dependency. This reveals that unit tests validate isolated behavior, but integration coupling is only visible when the full state contract (stock + sentiment_score + events) is satisfied — and if tests don’t assert on required fields, the gap remains invisible until runtime.",
+    "evidence_turns": [
+      1,
+      2,
+      7
+    ]
+  },
+  {
+    "session_id": "019d491d-5edc-7633-884e-2023f0978576",
+    "record_id": "knowledge_c9a56e4fe8f6",
+    "title": "UI rendering lag is often a symptom of unimplemented domain logic, not frontend bugs",
+    "insight": "The initial report showed no Epic5 content (turn 9), leading to suspicion of a frontend issue. But the root cause was that the visualization script hadn’t been updated to render newly added domain fields (e.g., stock_sectors, hot_themes). This is a recurring pattern: when UI output doesn’t reflect backend changes, the first hypothesis should be *missing template integration*, not broken rendering logic — especially when the backend JSON already contains the expected values (as confirmed in turn 7). The fix was adding HTML/CSS blocks, not debugging JS or CSS.",
+    "evidence_turns": [
+      7,
+      9,
+      14,
+      17,
+      32
+    ]
+  },
+  {
+    "session_id": "019d2328-1209-7583-8505-f17dca101747",
+    "record_id": "knowledge_009a200c4c83",
+    "title": "Page-level DOM inspection is necessary to detect client-side WAF challenges that bypass API response parsing",
+    "insight": "Cloud WAFs like Alibaba Cloud Shield often inject verification modals directly into the HTML DOM *without* altering the underlying API response status or body — meaning traditional error detection (status codes, JSON error fields) fails silently. A reliable detection strategy must therefore include active, runtime DOM inspection (e.g., checking for text content + modal styling) *before and after every network request*, not just parsing HTTP responses. This insight emerged from observing repeated 'access verification' popups that were missed by existing response-text checks, leading to blind continued execution until manual interruption.",
+    "evidence_turns": [
+      17,
+      29,
+      34,
+      35,
+      36
+    ]
+  },
+  {
+    "session_id": "019d2328-1209-7583-8505-f17dca101747",
+    "record_id": "knowledge_8b8e0092a355",
+    "title": "LLM event classification requires explicit prompt constraints, not just post-hoc filtering",
+    "insight": "When LLMs are used for semantic classification (e.g., distinguishing 'company events' from 'user actions'), relying on post-hoc rule-based filtering (regex, keyword lists) is brittle and misaligned with the goal of leveraging LLM intelligence. The robust approach is to encode the distinction directly in the prompt — explicitly instructing the model to exclude first-person actions and subjective statements — and then trust its output, using empty results as a valid signal rather than a failure to be patched. This was discovered through iterative failure: initial regex filtering produced false negatives (e.g., missing legitimate shareholder events), while removing it and strengthening the prompt led to correct 'no event' outputs for low-signal data.",
+    "evidence_turns": [
+      2,
+      4
+    ]
+  },
+  {
+    "session_id": "019d2328-1209-7583-8505-f17dca101747",
+    "record_id": "knowledge_9dc78cc7c81f",
+    "title": "Batched API pagination reduces total request count but does not eliminate cumulative-rate-based WAF triggering",
+    "insight": "Increasing API pagination size (e.g., from 20 to 100 comments per request) successfully reduces the *total number* of requests, but does not prevent WAFs from triggering on *cumulative request volume over time*. Real-world testing showed that even at ~22 requests/minute — a rate considered low for many APIs — sustained activity for ~10 minutes triggered Alibaba Cloud Shield. This reveals that WAFs often use multi-dimensional thresholds (time window + total count + behavioral consistency), not just instantaneous rate limits. Therefore, reducing request count alone is insufficient; pacing, jitter, and early termination based on global targets are equally critical.",
+    "evidence_turns": [
+      22,
+      31,
+      32
+    ]
+  },
+  {
+    "session_id": "019d2328-1209-7583-8505-f17dca101747",
+    "record_id": "knowledge_c8bf1673fc8a",
+    "title": "Partial result persistence must be atomic and metadata-rich to support safe interruption recovery",
+    "insight": "Naive 'append-on-each-item' persistence is unsafe under interruption because partial writes can corrupt the output file. The robust pattern is atomic checkpointing: write each incremental state to a temporary file, then atomically replace the target file. Crucially, the persisted state must include rich metadata (e.g., 'final/partial' flag, 'details_done' counter, 'run_started_at') so that both humans and future automation can unambiguously determine progress and resume correctly. This was learned by observing that prior 'all-or-nothing' output caused complete data loss on interruption, and the fix required not just writing more often, but writing *structured, self-describing snapshots*.",
+    "evidence_turns": [
+      19,
+      21,
+      29
+    ]
+  },
+  {
+    "session_id": "019cd224-662f-7653-8843-7a6f95d8a881",
+    "record_id": "knowledge_58602f081aea",
+    "title": "Domain capability packaging requires more than knowledge—it needs entrypoints and roles",
+    "insight": "To package a domain (e.g., BDD, security, UI design) as a reusable capability, you need three co-located artifacts: (1) a command (entrypoint), (2) one or more sub-agents (execution roles), and (3) skills (reference knowledge)—not just documentation or templates. Omitting any one breaks the 'installable capability' contract, even if the domain knowledge exists elsewhere.",
+    "evidence_turns": [
+      5,
+      7,
+      8,
+      9,
+      13
+    ]
+  },
+  {
+    "session_id": "019cd224-662f-7653-8843-7a6f95d8a881",
+    "record_id": "knowledge_e2806c9e26d3",
+    "title": "Slash commands are not syntactic primitives but structured execution contexts",
+    "insight": "In LLM-powered CLI/plugin systems, slash commands function as context injection points—not just prompt shortcuts. Their power lies in how their associated document (e.g., *.md) defines not only static instructions but also dynamic control flow (e.g., 'call subagent X with Y', 'include output from step Z'), enabling deterministic(ish) orchestration *despite* LLM non-determinism at the inference layer.",
+    "evidence_turns": [
+      5,
+      7,
+      8,
+      9,
+      10
+    ]
+  },
+  {
+    "session_id": "019cd224-662f-7653-8843-7a6f95d8a881",
+    "record_id": "knowledge_e645507da28a",
+    "title": "Plugin systems without runtime code are still real plugin systems",
+    "insight": "A plugin system can be entirely declarative—driven by configuration files (e.g., marketplace.json), directory structure, and markdown-based command/agent/skill definitions—without any executable runtime loader or framework code. Its 'plugin-ness' comes from discoverability, installability, composability, and consistent metadata contracts—not from dynamic import logic.",
+    "evidence_turns": [
+      1,
+      4,
+      5,
+      7,
+      8
+    ]
+  },
+  {
+    "session_id": "019cd224-662f-7653-8843-7a6f95d8a881",
+    "record_id": "knowledge_e72836c2d17d",
+    "title": "Sub-agent discovery is filesystem-driven and opt-in, not automatic",
+    "insight": "Sub-agents in tools like Codex are discovered via explicit filesystem conventions (e.g., ~/.codex/agents/*.toml or .codex/agents/*.toml), not introspection or registration APIs. They remain inert until referenced—either by user intent ('spawn 3 sub-agents') or by a command document's directive. This makes them lightweight but requires strict adherence to naming and location conventions for discoverability.",
+    "evidence_turns": [
+      20,
+      21,
+      22,
+      23
+    ]
+  },
+  {
+    "session_id": "019a9c86-7add-7e93-ab00-120aaff149cc",
+    "record_id": "knowledge_886afbbedcfc",
+    "title": "Few-shot examples must be derived from live code execution paths—not idealized narratives",
+    "insight": "The initial FEW_SHOTS.md contained plausible but inaccurate examples (e.g., wrong trigger condition for history compression). Only after cross-referencing `unified_strategies.py` and `ai_customer_v2.py`—and correcting numeric thresholds (`> 10`, not `>= 10`) and state mutation order (background tasks fire *during* `context_retrieve`, not after `END`)—did the examples become reliable. This proves that effective few-shot grounding requires trace-level verification: each example must map to an actual code path, with values and conditions copied directly from production logic, not abstracted or simplified.",
+    "evidence_turns": [
+      28,
+      31
+    ]
+  },
+  {
+    "session_id": "019a9c86-7add-7e93-ab00-120aaff149cc",
+    "record_id": "knowledge_943c7fbe2680",
+    "title": "Strategy logic cannot be inferred from I/O contracts alone—behavioral rules must be explicitly codified",
+    "insight": "Even with perfect schema definitions (DATA_CONTRACTS) and prompt texts (PROMPTS_ZH), LLMs cannot deduce *when* or *how* a strategy triggers (e.g., history compression only fires after >10 new turns, not just 'when history is long'). The session shows that 'business rules'—thresholds, heuristics, fallbacks, and ordering dependencies—must be extracted from code into standalone, unambiguous prose (STRATEGY_RULES.md), annotated with real constants (keep_turns=7) and verified against actual control flow. Without this, LLMs hallucinate plausible but incorrect logic.",
+    "evidence_turns": [
+      22,
+      23,
+      24,
+      25
+    ]
+  },
+  {
+    "session_id": "019a9c86-7add-7e93-ab00-120aaff149cc",
+    "record_id": "knowledge_a67bde210dbf",
+    "title": "Mermaid diagram fragility reveals a deeper principle: visual abstraction must decouple from implementation detail",
+    "insight": "Repeated mermaid parsing failures (due to HTML tags, backticks, complex labels) were not just syntax issues—they exposed a design flaw: trying to overload diagrams with both conceptual roles *and* implementation details (paths, class names). The robust solution wasn't 'fix the escaping' but to strip diagrams down to pure logical structure (e.g., 'StageJudgePrompt' node) and move all implementation mapping (file path, class name) to a separate, machine-readable table. This ensures diagrams remain stable, readable, and tool-agnostic.",
+    "evidence_turns": [
+      5,
+      6
+    ]
+  },
+  {
+    "session_id": "019a9c86-7add-7e93-ab00-120aaff149cc",
+    "record_id": "knowledge_fab931d0d272",
+    "title": "LLM-facing documentation requires strict separation of protocol, instruction, and behavior layers",
+    "insight": "For LLMs to reliably reconstruct agent behavior without code access, documentation must be rigorously stratified: (1) architecture defines flow and state transitions, (2) data contracts define exact schemas and interfaces, (3) prompts provide verbatim instructions, (4) strategy rules encode decision logic as pseudo-code + constraints, and (5) few-shot examples ground all abstractions in concrete, code-verified scenarios. Mixing these layers (e.g., embedding prompt text inside architecture docs or giving 'example' JSON instead of MUST-compliant schema) introduces ambiguity that LLMs cannot resolve.",
+    "evidence_turns": [
+      8,
+      10,
+      14
+    ]
+  },
+  {
+    "session_id": "019a8175-eac0-7f41-8e58-746f84168036",
+    "record_id": "knowledge_667615c111a7",
+    "title": "dialog_id and session_id serve distinct, non-interchangeable roles in real-time speech APIs",
+    "insight": "In real-time speech-to-speech (S2S) systems like VolcEngine's, `session_id` is the mandatory, per-connection routing key used for *all* audio frames and event delivery, while `dialog_id` is an optional, one-time metadata field sent only at `StartSession` to signal conceptual continuity or persona configuration. Crucially, `dialog_id` is *not* guaranteed to persist across sessions or connections; treating it as a durable memory handle leads to incorrect architectural assumptions. Session-level state must be managed externally (e.g., via DB-backed summaries injected via `external_rag`).",
+    "evidence_turns": [
+      25,
+      26
+    ]
+  },
+  {
+    "session_id": "019a8175-eac0-7f41-8e58-746f84168036",
+    "record_id": "knowledge_aca8e129bc2f",
+    "title": "Prompt engineering for role-playing agents requires explicit first-person framing and anti-assistant constraints",
+    "insight": "Simply injecting role attributes (name, job, description) into a system prompt is insufficient to prevent LLMs from defaulting to 'assistant' or 'customer service' behavior. Strong, explicit constraints are needed: first-person identity declaration ('You are X'), prohibition of service-oriented phrases ('I can help you', 'as your assistant'), banning of knowledge explanation, and clear output formatting rules (e.g., 'only output the customer's spoken line'). These constraints must be prioritized over configuration-derived fields like 'prompt.etc' to avoid ambiguity.",
+    "evidence_turns": [
+      8,
+      9,
+      11
+    ]
+  },
+  {
+    "session_id": "019a8175-eac0-7f41-8e58-746f84168036",
+    "record_id": "knowledge_e9ba28f313bf",
+    "title": "Progressive integration checklists require explicit separation of 'engine-side' vs 'application-side' memory responsibilities",
+    "insight": "Effective integration of conversational features (e.g., stage-aware prompting, memory) requires explicitly assigning responsibility: engine-side (`dialog_id`, `session_id`) handles *short-term, connection-bound context*; application-side (DB, in-memory cache) handles *long-term, cross-session state*. A checklist that conflates these (e.g., listing 'dialog_id reuse' as a memory feature without caveats) creates false confidence. Validated checklists must annotate each item with its scope (engine vs app) and reliability (guaranteed vs best-effort vs experimental).",
+    "evidence_turns": [
+      18,
+      19,
+      20,
+      21
+    ]
+  },
+  {
+    "session_id": "019a8175-eac0-7f41-8e58-746f84168036",
+    "record_id": "knowledge_f425680a7f6a",
+    "title": "System prompt construction should separate 'identity' from 'context injection' to prevent role drift",
+    "insight": "Injecting external data (e.g., product info, RAG results) directly into the system prompt—even when logically relevant—introduces latent 'expert' or 'explanatory' priors that conflict with a non-expert role (e.g., a customer). The safest pattern is to keep the system prompt strictly about identity, boundaries, and behavior, while using runtime mechanisms (e.g., external_rag, context slots) for dynamic information—*and only if the role is permitted to know it*. For a customer, product details belong in the salesperson's context, not the customer's prompt.",
+    "evidence_turns": [
+      8,
+      9,
+      11,
+      17
+    ]
+  },
+  {
+    "session_id": "019de8bb-93e8-7000-8964-6ce15e9ec87f",
+    "record_id": "knowledge_16b20a49d9ca",
+    "title": "Context engineering requires explicit evidence traceability, not just filtering",
+    "insight": "Filtering and compressing raw session data is insufficient for robust context engineering; the pipeline must preserve unambiguous, stable references to original events (e.g., line numbers or event IDs) — not just normalized synthetic IDs like 'msg_0001' — to enable post-hoc validation, debugging, and causal chain reconstruction. Synthetic IDs break traceability when normalization changes structure or order.",
+    "evidence_turns": [
+      1,
+      3
+    ]
+  },
+  {
+    "session_id": "019de8bb-93e8-7000-8964-6ce15e9ec87f",
+    "record_id": "knowledge_27a840603775",
+    "title": "Tool output compression heuristics fail on non-error evidence patterns",
+    "insight": "Relying solely on error-related keywords (e.g., 'exception', 'permission denied') to decide which lines of tool output to retain risks discarding high-value non-error evidence — such as test summaries, diff outputs, lint reports, or success-state diagnostics — that contain critical context for reasoning but lack traditional error tokens.",
+    "evidence_turns": [
+      1,
+      3
+    ]
+  },
+  {
+    "session_id": "019de8bb-93e8-7000-8964-6ce15e9ec87f",
+    "record_id": "knowledge_ab3d394b019d",
+    "title": "Normalized transcripts must preserve causal ordering, not just syntactic structure",
+    "insight": "A 'normalized transcript' that filters low-signal messages and compresses content may unintentionally break causal chains (e.g., a user's follow-up question referencing a prior tool output that was truncated or filtered). Context engineering must verify temporal and referential integrity — not just produce clean JSON — by checking whether retained events still support coherent reasoning across turns.",
+    "evidence_turns": [
+      1,
+      3
+    ]
+  },
+  {
+    "session_id": "019de815-9aca-7051-824d-5c94b36bd869",
+    "record_id": "knowledge_b8a0d5c599bf",
+    "title": "Two-pass extraction is necessary for high-fidelity pattern discovery",
+    "insight": "A robust pattern extraction pipeline requires two distinct phases: (1) lightweight, per-chunk 'signal detection' (low-confidence, minimal fields, no admission), followed by (2) session-level consolidation and validation (LLM or rule-based) that enforces evidence closure, deduplication, and scope correctness. This avoids both over-splitting and context overflow, and enables quality gating before canonicalization.",
+    "evidence_turns": [
+      1,
+      2,
+      3,
+      5,
+      11,
+      12
+    ]
+  },
+  {
+    "session_id": "019de815-9aca-7051-824d-5c94b36bd869",
+    "record_id": "knowledge_d008ecb4fa14",
+    "title": "Chunk-level pattern extraction is fundamentally unsound",
+    "insight": "Pattern knowledge requires evidence of validation and cross-context reusability, which cannot be reliably inferred from isolated text chunks. Unlike pitfalls (which manifest as local failures), effective patterns emerge from observing a practice succeed across multiple contexts or iterations — a holistic signal that chunking destroys. This leads to over-splitting, semantic duplication, and inflated confidence scores.",
+    "evidence_turns": [
+      1,
+      2,
+      3,
+      5,
+      11,
+      12
+    ]
+  },
+  {
+    "session_id": "019de815-9aca-7051-824d-5c94b36bd869",
+    "record_id": "knowledge_dc6f80d0b027",
+    "title": "Confidence scores from LLM pattern extractors are dangerously misleading without explicit calibration",
+    "insight": "LLMs assign high confidence (e.g., 0.95–1.0) to pattern candidates even when evidence is partial, scope is incorrectly globalized, or the candidate represents a one-off fix rather than a reusable principle. Confidence must be decoupled from raw model output and instead derived from objective criteria: evidence presence, scope alignment, and cross-chunk consistency — not just prompt compliance.",
+    "evidence_turns": [
+      11,
+      12
+    ]
+  },
+  {
+    "session_id": "019de2a6-b9d7-7951-971c-5491eb2978cb",
+    "record_id": "knowledge_0232a06eaa3f",
+    "title": "pytest testpaths overrides default directory discovery",
+    "insight": "Setting `testpaths = [\"tests/unit\"]` in pyproject.toml causes pytest to ignore all other directories (including tests/ root and tests/integration/) unless explicitly specified on the CLI — this is stricter than just filtering collected tests; it changes where pytest looks for test files entirely. This behavior is not obvious from the docs, which emphasize 'where to look' but don't clarify that it *excludes* unlisted paths even if they contain valid test files.",
+    "evidence_turns": [
+      1
+    ]
+  },
+  {
+    "session_id": "019de2a6-b9d7-7951-971c-5491eb2978cb",
+    "record_id": "knowledge_a24dd14ced40",
+    "title": "Integration tests using real SQLite benefit from concurrency stress beyond unit mocks",
+    "insight": "Unit tests mocking `KnowledgeStore` methods (e.g., `save_canonical_embedding`) verify correctness under controlled isolation, but do not expose race conditions or connection-management bugs in the *real* SQLite-backed implementation. A dedicated integration test launching many threads against actual `record_agent_invocation` and `save_canonical_embedding` calls surfaces SQLite locking behavior, transaction isolation limits, and thread-safety gaps that mocks cannot catch — making it a necessary complement, not redundancy.",
+    "evidence_turns": [
+      1
+    ]
+  },
+  {
+    "session_id": "019de2a6-b9d7-7951-971c-5491eb2978cb",
+    "record_id": "knowledge_e6977dfa629d",
+    "title": "Real LLM e2e tests require both API key presence *and* local data availability to avoid flaky skips",
+    "insight": "A skip condition based solely on `DASHSCOPE_API_KEY` is insufficient: the test also needs accessible session data (e.g., `~/.codex/sessions`) to proceed meaningfully. If sessions are missing, the test may pass vacuously or fail unexpectedly — so robust e2e tests must check *both* environment readiness *and* data prerequisites before attempting LLM calls, otherwise skip logic becomes unreliable and masks real setup issues.",
+    "evidence_turns": [
+      1
+    ]
+  }
+]

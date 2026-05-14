@@ -1,0 +1,30 @@
+session_id: 019a33d4-5a5e-7502-98f6-22b734c18890
+file_size_kb: 78
+description: git push 和 branch 同步操作，内容仍偏基础
+
+expected_count:
+  min: 0
+  max: 1
+
+annotations:
+  - title: "Git push uploads missing commits and advances remote branch pointer"
+    verdict: REJECT
+    reason: >
+      对 git push 机制的基础解释，任何 git 入门教程都有，
+      不是从错误或意外中学到的洞察。
+
+  - title: "Branch synchronization strategies must align with team history policy"
+    verdict: BORDERLINE
+    reason: >
+      merge vs rebase 取决于团队 history policy 这个判断有一定价值，
+      但表述仍然太通用。只有在 session 中出现了因策略不一致导致问题的证据时才值得保留。
+
+  - title: "Force-push is about reference relocation—not content mutation"
+    verdict: BORDERLINE
+    reason: >
+      对 force-push 的机制澄清有一定价值（纠正常见误解），
+      但需要 session 中有人因误解 force-push 语义而犯错的证据才算真实洞察。
+
+what_should_be_extracted: >
+  如果 session 中有因 git 操作误解导致错误后修复的过程，可以保留 1 条。
+  否则应输出 0 条。

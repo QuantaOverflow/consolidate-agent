@@ -1,0 +1,35 @@
+session_id: 019d6be3-2303-7f70-8721-8b5762ccb10d
+file_size_kb: 1365
+description: State machine / LangGraph agent 开发，高 evidence，质量较好
+
+expected_count:
+  min: 2
+  max: 4
+
+annotations:
+  - title: "State machine node responsibility discipline"
+    verdict: KEEP
+    reason: >
+      evidence=18 spread=1.0，整个 session 反复验证了 node 职责边界的重要性，
+      是从实际设计迭代中提炼的洞察，不是文档知识。
+
+  - title: "HITL interruption protocol design"
+    verdict: KEEP
+    reason: >
+      Human-in-the-loop 中断协议的设计考量，evidence=12，
+      是实际系统设计中非显而易见的决策点。
+
+  - title: "Post-ID normalization contract"
+    verdict: BORDERLINE
+    reason: >
+      数据规范化契约，evidence=9，有价值但偏 project_specific。
+      需要看 insight 是否有足够的通用性，否则应标为 project_specific 而非 global。
+
+  - title: "Checkpoint isolation strategy for multi-source graphs"
+    verdict: KEEP
+    reason: >
+      多源图的 checkpoint 隔离策略，evidence=4，是具体架构决策的洞察。
+
+what_should_be_extracted: >
+  这个 session 质量好，新 prompt 应保留大部分现有记录。
+  主要验证：scope 分类是否准确（state machine 相关应为 project_specific 而非 global）。

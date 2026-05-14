@@ -1,0 +1,42 @@
+session_id: 019d80f4-d008-7f22-9d86-7ec11665fda4
+file_size_kb: 1107
+description: 数据爬取/查询系统，adaptive query windowing，中等质量
+
+expected_count:
+  min: 2
+  max: 3
+
+annotations:
+  - title: "Adaptive query windowing with deterministic fallback"
+    verdict: KEEP
+    reason: >
+      查询窗口自适应 + 确定性 fallback 的组合策略，evidence=7 spread=1.0，
+      是从实际数据获取失败中归纳的非显而易见模式。
+
+  - title: "Two-phase commit for data integrity with guaranteed traceability"
+    verdict: KEEP
+    reason: >
+      两阶段写入保证数据完整性和可追溯性，evidence=6 spread=0.83，
+      是实际系统设计中的关键决策，有工程价值。
+
+  - title: "Task execution abstraction should preserve domain structure"
+    verdict: BORDERLINE
+    reason: >
+      任务抽象应保留领域结构，概念合理但表述偏抽象，
+      需要看 session 中是否有具体的反例（没有保留结构导致的问题）。
+
+  - title: "Failure state separation via synthetic identifiers"
+    verdict: REJECT
+    reason: >
+      evidence=1 spread=0.0，单点观察，可能是 LLM 从一个 turn 强行归纳。
+      不满足"经过验证的洞察"标准。
+
+  - title: "Source-aware field normalization in unified data models"
+    verdict: REJECT
+    reason: >
+      evidence=1 spread=0.0，且明显是 project_specific（特定数据源字段规范化），
+      不应被提取为 global。
+
+what_should_be_extracted: >
+  保留 adaptive windowing 和 two-phase commit 两条核心洞察。
+  新 prompt 应过滤掉 evidence=1 的两条和过于抽象的那条。
