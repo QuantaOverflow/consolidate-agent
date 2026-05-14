@@ -70,7 +70,11 @@ def _check_rate(value: float, pass_thresh: float, warn_thresh: float, higher_is_
 
 
 def validate(assignments_path: Path) -> int:
-    assignments: list[dict] = json.loads(assignments_path.read_text(encoding="utf-8"))
+    raw = json.loads(assignments_path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict) and "assignments" in raw:
+        assignments: list[dict] = raw["assignments"]
+    else:
+        assignments = raw  # raw list form
     n = len(assignments)
     if n == 0:
         print("No assignments found. Cannot validate.", file=sys.stderr)

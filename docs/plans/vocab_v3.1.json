@@ -1,0 +1,95 @@
+{
+  "version": "v3.1-post-maintenance",
+  "drafted_at": "2026-05-13",
+  "status": "scoped down per ADR-0004; only Matter + lesson_type",
+  "scheme": "single-facet controlled vocabulary (Matter) + polarity enum (lesson_type)",
+  "notes": "v3.0 vocab after 5 propose_refine maintenance iterations on top forced_fit candidates. Run scripts/run_minimal_tagging.py --vocab docs/plans/vocab_v3.1.json --out outputs/network_v3_p2.json to re-tag with updated definitions.",
+  "facets": {
+    "matter": {
+      "description": "What technical subject the record is about. Each record gets 1-2 matter tags.",
+      "tags": [
+        {
+          "name": "llm_agent_runtime",
+          "definition": "LLM API calls (DashScope, OpenAI, Anthropic), prompt template management, model output parsing (JSON / structured output), agent tool invocation, token streaming, embedding generation. Covers chat model behavior, tool calling protocols, and any DashScope/OpenAI/Anthropic SDK usage. Boundary: not about LangGraph orchestration (use langgraph_state) — about the model and SDK layer."
+        },
+        {
+          "name": "langgraph_state",
+          "definition": "LangGraph StateGraph topology, nodes/edges definitions, state schema (TypedDict / Pydantic), reducers, checkpointers (MemorySaver / SqliteSaver), thread_id management, interrupt/Command HITL. Covers StateGraph quirks, state field merging rules, and graph compilation. Boundary: not about the LLM model itself (use llm_agent_runtime)."
+        },
+        {
+          "name": "persistence_db",
+          "definition": "Persistence-layer and database operations: SQLite/relational schema design, migrations (column add/drop/rename), INSERT/SELECT statements, transaction boundaries, DEFAULT handling, index design. Covers KnowledgeStore, sqlite3 module, schema evolution and on-disk storage. Boundary: not about in-memory state (use langgraph_state) or file-based config (use config_env)."
+        },
+        {
+          "name": "filesystem_path",
+          "definition": "Filesystem path operations: constructing, normalizing, resolving, or matching literal path strings (e.g., via pathlib.Path, os.path.join, glob patterns, or static route matching in frameworks like Astro); includes path-based routing priority, silent failure on invalid skill paths, and trace file separation by semantic path. Excludes file content handling (json_serialization), persistence logic (persistence_db), CLI argument parsing (cli_argv), or plugin metadata interpretation (config_env)."
+        },
+        {
+          "name": "git_vcs",
+          "definition": "Git operations: commit, branch, merge (fast-forward / no-ff), rebase, stash, diff, status, gitignore semantics, pull request workflow, conventional commit conventions. Boundary: not about CI/CD pipelines on top of git (use build_deployment)."
+        },
+        {
+          "name": "testing_framework",
+          "definition": "Test framework specifics: pytest/unittest test discovery, fixture lifecycle, mocking patterns, assertion APIs, test isolation, integration test setup, coverage tools, FakeEmbeddings / test doubles. Boundary: not about the act of writing tests (use Activity:testing); this is the technical object being used."
+        },
+        {
+          "name": "http_api",
+          "definition": "HTTP protocol interaction at the request/response wire level: constructing and sending HTTP requests (e.g., curl, Python requests), parsing raw responses (e.g., stripping JSONP prefixes, extracting status codes), validating endpoints via direct API calls (e.g., getWebhookInfo), handling HTTP-specific constraints (e.g., Telegram's editMessageText rate limits), and diagnosing HTTP-layer failures (e.g., 401 vs 403, missing headers). Excludes CLI argument parsing (cli_argv), proxy routing logic (Surge RULE-SET), or general network error resilience without HTTP-specific behavior."
+        },
+        {
+          "name": "async_concurrency",
+          "definition": "Async/await semantics: asyncio event loops, asyncio.to_thread, threading.Thread, locks, race conditions, async-sync bridging, ToolNode sync requirements. Covers thread-safety, concurrent execution, and async wrapper patterns. Boundary: not about LangGraph parallelism (use langgraph_state)."
+        },
+        {
+          "name": "cli_argv",
+          "definition": "Command-line interface design: argparse/typer/click setup, flag/subcommand structure, argv parsing, stdin/stdout/stderr handling, exit codes, shell escaping. Boundary: not about scripts as orchestration scaffolding (use Activity:configuring or deploying)."
+        },
+        {
+          "name": "frontend_browser",
+          "definition": "Browser automation and rendering: Playwright/CDP page lifecycle, DOM querying, JavaScript execution, cookie/session injection, WAF detection, frontend rendering performance. Boundary: not about HTTP-level concerns (use http_api)."
+        },
+        {
+          "name": "config_env",
+          "definition": "Configuration and environment management: loading, resolving, and propagating runtime configuration state via environment variables, .env files, structured config files (e.g., pyproject.toml, settings.py), and API keys/secrets — specifically how they are read, merged, validated, and injected into the application's execution context at startup or initialization. Excludes deployment automation (build_deployment), general security anti-patterns, IDE/plugin internals, network stack behavior, or domain-logic decisions like caching or date handling."
+        },
+        {
+          "name": "package_dependency",
+          "definition": "Package manager and dependency operations: pip/uv/poetry/npm installation, virtualenv creation, version pinning, lock files (uv.lock), pyproject.toml manipulation, dependency conflict resolution. Boundary: not about runtime imports (use Activity:configuring if about setup)."
+        },
+        {
+          "name": "json_serialization",
+          "definition": "Structured data formats: JSON/YAML/TOML parsing and generation, Pydantic models, schema validation, dict-to-JSON conversion edge cases, serialization gotchas (datetime, None, NaN). Boundary: not about LLM output as JSON (use llm_agent_runtime)."
+        },
+        {
+          "name": "logging_observability",
+          "definition": "Log and trace telemetry infrastructure: structured log emission (JSONL), trace event typing and semantics, log growth-rate sampling, error storm detection via timestamp clustering, log deduplication (e.g., by requestId), trace directory setup hygiene, and log-volume–CPU correlation *as evidence of logging subsystem behavior*. Excludes general debugging activity, resource diagnostics, stack trace parsing logic, or non-telemetry uses of logs (e.g., as debug artifacts in browser devtools)."
+        },
+        {
+          "name": "datetime_handling",
+          "definition": "Date/time values: timezone handling (UTC, ISO 8601), date arithmetic, epoch conversion, date string parsing, time-partitioned data structures. Covers datetime module and timezone-aware comparisons. Boundary: focused on temporal correctness, not on scheduling (use Activity:deploying for cron)."
+        },
+        {
+          "name": "build_deployment",
+          "definition": "Automated, platform-integrated procedures that package source code into deployable artifacts (e.g., Docker images, release binaries), validate them (e.g., webhook health checks, secret injection verification), and deploy them to target environments (e.g., Kubernetes clusters, systemd services configured as part of a release pipeline). Excludes local development tooling, runtime dependency management, ad-hoc debugging commands, and in-process scheduling logic."
+        }
+      ]
+    }
+  },
+  "lesson_type": {
+    "description": "The polarity/type of the lesson. Each record gets exactly 1 lesson_type. This is an enum field, not a tag facet.",
+    "values": [
+      {
+        "name": "anti_pattern",
+        "definition": "What NOT to do. A mistake, fragile approach, or naive solution that causes failures. The record's tone is 'don't / avoid / never / breaks'. Examples: 'Mocking the DB hides migration failures', 'Hand-crafting plist XML is error-prone'."
+      },
+      {
+        "name": "discovery",
+        "definition": "A surprising or non-obvious behavior of a tool, framework, or system. The lesson is the discovery itself, documenting how something actually works (often contrary to expectation). Examples: 'StateGraph silently drops unknown keys', 'fast-forward merge creates no commit'."
+      },
+      {
+        "name": "best_practice",
+        "definition": "A recommended approach or correct way to handle X. The record's tone is 'should / prefer / use Y'. Examples: 'asyncio.to_thread for blocking IO', 'plistlib over string templating'."
+      }
+    ]
+  }
+}

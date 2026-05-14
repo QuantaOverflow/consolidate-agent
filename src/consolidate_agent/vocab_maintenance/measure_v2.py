@@ -104,22 +104,22 @@ Putting a Matter tag in `activity_tag` or vice versa is a hard error.
 ═══ WORKED EXAMPLES ═══
 
 Example A — Record: "Using MemorySaver as checkpointer does not persist state across process restarts"
-  matter_tags   : [{"name": "langgraph_state", "confidence": "high"}]
-  activity_tag  : {"name": "designing", "confidence": "high"}
-  pattern_tags  : [{"name": "silent_failure", "confidence": "high"}]
+  matter_tags   : [{{"name": "langgraph_state", "confidence": "high"}}]
+  activity_tag  : {{"name": "designing", "confidence": "high"}}
+  pattern_tags  : [{{"name": "silent_failure", "confidence": "high"}}]
   lesson_type   : "anti_pattern"
   reason        : "MemorySaver silently loses state; the engineer was making a design-time mistake."
 
 Example B — Record: "asyncio.to_thread wraps blocking DB calls; calling in async context without it causes event-loop stall"
-  matter_tags   : [{"name": "async_concurrency", "confidence": "high"}, {"name": "persistence_db", "confidence": "medium"}]
-  activity_tag  : {"name": "integrating", "confidence": "high"}
-  pattern_tags  : [{"name": "explicit_contract", "confidence": "medium"}]
+  matter_tags   : [{{"name": "async_concurrency", "confidence": "high"}}, {{"name": "persistence_db", "confidence": "medium"}}]
+  activity_tag  : {{"name": "integrating", "confidence": "high"}}
+  pattern_tags  : [{{"name": "explicit_contract", "confidence": "medium"}}]
   lesson_type   : "best_practice"
   reason        : "Recommended way to bridge blocking IO into async; integrating two subsystems."
 
 Example C — Record: "git fast-forward merge leaves no merge commit; git log looks like a straight line"
-  matter_tags   : [{"name": "git_vcs", "confidence": "high"}]
-  activity_tag  : {"name": "debugging", "confidence": "medium"}
+  matter_tags   : [{{"name": "git_vcs", "confidence": "high"}}]
+  activity_tag  : {{"name": "debugging", "confidence": "medium"}}
   pattern_tags  : []
   lesson_type   : "discovery"
   reason        : "Non-obvious git behavior; no abstract pattern — pure tool-specific discovery."
