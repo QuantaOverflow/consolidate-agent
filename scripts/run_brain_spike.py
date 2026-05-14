@@ -84,27 +84,44 @@ def format_timeline(result: dict) -> str:
             lines.append(f"Round {r + 1}: (no decision)")
             continue
 
-        dec = d["decision"]
-        gate = d["gate"]
-        gate_str = gate["result"].upper()
-        action = dec["action"]
-        target = dec.get("target", "") or ""
-        certainty = dec.get("certainty", "?")
+        # Plan-execute records have shape {ticket, verdict, decision, gate, committed, outcome}.
+        # Legacy records have shape {decision, gate, committed, outcome}.
+        ticket = d.get("ticket")
+        verdict = d.get("verdict")
+        dec = d.get("decision") or {}
+        gate = d.get("gate")
+        outcome = d.get("outcome", "") or ""
         committed = d.get("committed", False)
-        outcome = d.get("outcome", "")
 
-        if action == "stop":
-            lines.append(f"Round {r + 1}: STOP — cert={certainty}, gate={gate_str}")
-        elif committed:
+        if ticket:
+            action = ticket.get("action", "?")
+            target = ticket.get("target", "")
+            if action == "merge" and ticket.get("target_b"):
+                target = f"{target}↔{ticket['target_b']}"
+            verdict_str = verdict.get("verdict") if verdict else "no-verdict"
+            gate_str = gate["result"].upper() if gate else "—"
+            tag = "APPLIED" if committed else "SKIPPED"
             lines.append(
-                f"Round {r + 1}: {action} {target} (cert={certainty}) — gate={gate_str} → APPLIED"
+                f"Round {r + 1}: {action} {target} — verdict={verdict_str} gate={gate_str} → {tag}"
                 + (f"\n  outcome: {outcome}" if outcome else "")
             )
         else:
-            lines.append(
-                f"Round {r + 1}: {action} {target} (cert={certainty}) — gate={gate_str}"
-                + (f" | {outcome}" if outcome else "")
-            )
+            gate_str = gate["result"].upper() if gate else "—"
+            action = dec.get("action", "?")
+            target = dec.get("target", "") or ""
+            certainty = dec.get("certainty", "?")
+            if action == "stop":
+                lines.append(f"Round {r + 1}: STOP — cert={certainty}, gate={gate_str}")
+            elif committed:
+                lines.append(
+                    f"Round {r + 1}: {action} {target} (cert={certainty}) — gate={gate_str} → APPLIED"
+                    + (f"\n  outcome: {outcome}" if outcome else "")
+                )
+            else:
+                lines.append(
+                    f"Round {r + 1}: {action} {target} (cert={certainty}) — gate={gate_str}"
+                    + (f" | {outcome}" if outcome else "")
+                )
 
     total_calls = result["total_llm_calls"]
     applied = result["applied_count"]

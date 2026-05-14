@@ -820,59 +820,841 @@ def route_after_archive(state: BrainState) -> Literal["orient", "end"]:
     return "orient"
 
 
+# ── Plan-Execute architecture (ADR-0009) ──────────────────────────────────
+
+
+class SpecialistVerdict(BaseModel):
+    """Output schema for the specialist reviewer."""
+    verdict: Literal["approve", "reject", "dig_deeper"]
+    reasoning: str = Field(min_length=40, max_length=2000)
+    cited_facts: list[str] = Field(default_factory=list, max_length=8)
+    # When verdict=dig_deeper, which read-only tool to call.
+    dig_tool: Literal["inspect_tag", "compare_tags", "inspect_records", ""] = ""
+    dig_args: dict = Field(default_factory=dict)
+
+
+class ForcedCommitVerdict(BaseModel):
+    """Final verdict when dig budget is exhausted — must choose approve/reject."""
+    verdict: Literal["approve", "reject"]
+    reasoning: str = Field(min_length=40, max_length=2000)
+    cited_facts: list[str] = Field(default_factory=list, max_length=8)
+
+
+_SHARED_HEADER = """You are a specialist reviewer for a vocabulary maintenance system.
+
+ROLE: You do NOT choose what to do. The plan stage already gave you a specific
+(action, target) ticket. Your job: look at the proposal + preview diff +
+sample record contents, decide approve / reject / dig_deeper.
+
+TICKET:
+  action: {action}
+  target: {target}
+
+PROPOSAL + PREVIEW DIFF (this is what would actually happen if you approve):
+{preview_block}
+
+DIG_DEEPER TOOLS (when verdict=dig_deeper):
+
+  inspect_records(record_ids=[...])  ← PREFERRED for auditing specific records
+    → return full insight text + current matter tags for up to 10 record_ids.
+    → use when: you want to verify the ACTUAL CONTENT of records named in
+      the preview (e.g., prune list, suspicious sub-tag samples). The
+      preview only shows 500-char insight snippets — call inspect_records
+      with the suspect IDs to see full content and confirm/refute your doubt.
+
+  inspect_tag(tag_name, n_samples=20)
+    → return that tag's definition + N sample record titles/insights.
+    → use when: you want to see what records a DIFFERENT tag holds, e.g.
+      a neighbor tag to verify it could absorb pruned records, or a
+      sub-tag of a split to audit cohesion. Do NOT use to re-inspect
+      target — its samples are already in the preview.
+
+  compare_tags(tag_a, tag_b)
+    → return overlap stats + shared records between two tags.
+    → use when: testing if a merge candidate pair really share semantics,
+      or if pruned records might naturally migrate to a neighbor.
+
+CRITICAL RULES:
+  - Each dig must ask a DIFFERENT question. Re-querying same (tool, args)
+    returns "ALREADY_INSPECTED" — counts toward your 2-dig budget but
+    yields no new info.
+  - Max 2 digs per ticket; after that, output approve or reject based on
+    current evidence.
+
+OUTPUT REQUIREMENTS:
+- cited_facts MUST reference concrete data from the preview (numbers, record
+  titles, tag transitions). Generic claims like "looks coherent" are not facts.
+- If verdict=dig_deeper, set dig_tool to "inspect_tag" or "compare_tags" and
+  fill dig_args (e.g., {{"tag_name": "config_env"}} or {{"tag_a": "X", "tag_b": "Y"}}).
+- Reject means: the proposal has clear semantic problems (records mis-assigned,
+  off-topic prune list, sub-tag definitions don't match their records, etc).
+"""
+
+
+_REFINE_PROMPT = _SHARED_HEADER + """
+REFINE — pattern recognition:
+
+GOOD refine signals:
+- prune list has a coherent off-topic theme (e.g., 8 records all about
+  auth/security, target is supposed to be HTTP protocol → prune is sharpening).
+- orphan_count = 0 (records keep other matter tags after losing this one).
+- target_size_after still >= 15 (tag stays viable).
+- new_definition's exclusions explicitly call out the prune theme.
+
+BAD refine signals:
+- prune list semantically diverse — multiple distinct sub-themes. This means
+  the tag should SPLIT, not refine. Verdict: reject.
+- orphan_count > 0 — records lose their only matter tag.
+- target_size_after < 10 — tag becomes too small.
+- prune records' insights look ON-topic to the original definition — new_def
+  is over-narrowing.
+
+DIG WALKTHROUGH (use this Chain-of-Thought when you're uncertain):
+
+  Suppose preview shows 5 records to prune, and 2 of them have titles
+  that don't obviously match an off-topic theme.
+
+  Step 1 — inspect those exact records' full content:
+    verdict=dig_deeper, dig_tool="inspect_records",
+    dig_args={{"record_ids": ["knowledge_<suspect1>", "knowledge_<suspect2>"]}}
+    ← reveals full insight text + their other current matter tags
+
+  After Step 1 reading the result:
+  • If full text confirms records are off-topic → approve
+    cite: "inspect_records knowledge_xxx insight confirms record is about
+    CLI auth, off-topic for relational persistence — prune is correct"
+  • If full text shows records are on-topic → reject
+    cite: "inspect_records knowledge_xxx is core to relational persistence
+    (table design, schema migration) — should NOT be pruned"
+  • If still unclear → Step 2 with a DIFFERENT question:
+
+  Step 2 — check the records' fallback tag:
+    verdict=dig_deeper, dig_tool="inspect_tag",
+    dig_args={{"tag_name": "<one of their other tags>", "n_samples": 20}}
+    ← see if their other matter tag really houses similar concepts
+
+  After Step 2: you MUST output approve or reject (dig budget exhausted).
+
+  KEY: each dig asks a DIFFERENT question. Never repeat same dig_args.
+"""
+
+
+_SPLIT_PROMPT = _SHARED_HEADER + """
+SPLIT — pattern recognition:
+
+GOOD split signals:
+- Each sub-tag has clear, distinct semantic anchor (visible in sub-tag samples).
+- sub-tag sizes balanced (none < 15 records).
+- sub-tag sample_records' insights consistently match their sub-tag's definition.
+- orphan_count = 0.
+
+BAD split signals:
+- One sub-tag has < 10 records (pseudo-split — refine the dominant sub-tag).
+- sub-tag samples don't match their definition (LLM judge fabricated a sub-tag).
+- sub-tag definitions overlap heavily (split axis unclear).
+- The original tag wasn't heterogeneous; samples could have stayed together.
+
+DIG WALKTHROUGH:
+
+  Suppose one sub-tag's samples look unclear — its records' titles span
+  several themes.
+
+  Step 1 — read full content of those records:
+    verdict=dig_deeper, dig_tool="inspect_records",
+    dig_args={{"record_ids": [<3-5 ids from the suspicious sub-tag>]}}
+
+  After Step 1:
+  • Records consistently match the sub-tag's definition → approve sub-tag valid
+  • Records are heterogeneous within the sub-tag → reject (sub-tag itself
+    needs splitting, the split axis is wrong)
+  • Two sub-tags look like they might overlap → Step 2:
+
+  Step 2 — compare two sub-tags that seem fuzzy:
+    verdict=dig_deeper, dig_tool="compare_tags",
+    dig_args={{"tag_a": "<sub_A>", "tag_b": "<sub_B>"}}
+
+  After Step 2: MUST approve or reject.
+
+  KEY: each dig asks a DIFFERENT question. Never repeat same dig_args.
+"""
+
+
+_DEPRECATE_PROMPT = _SHARED_HEADER + """
+DEPRECATE — pattern recognition:
+
+GOOD deprecate signals:
+- target_size < 15 (marginal mass).
+- orphan_count = 0 (records have other matter tags to absorb semantics).
+- target_records_sample: records' semantics better served by other matter tags.
+
+BAD deprecate signals:
+- orphan_count > 0.
+- target_records_sample shows distinctive semantics not captured elsewhere.
+- target_size > 20 — not actually marginal.
+
+DIG WALKTHROUGH:
+
+  Suppose target_size=12 and you want to verify the records' other tags
+  truly cover the semantics.
+
+  Step 1 — see full content of target's records:
+    verdict=dig_deeper, dig_tool="inspect_records",
+    dig_args={{"record_ids": [<all/most target_records ids>]}}
+
+  After Step 1:
+  • Records clearly fit another matter tag (visible in current_matter_tags)
+    → approve
+  • Records contain distinctive concepts not captured elsewhere → reject
+  • Need to check whether candidate fallback tag really fits → Step 2:
+
+  Step 2 — inspect the proposed fallback tag:
+    verdict=dig_deeper, dig_tool="inspect_tag",
+    dig_args={{"tag_name": "<candidate fallback>", "n_samples": 20}}
+
+  After Step 2: MUST approve or reject.
+"""
+
+
+_MERGE_PROMPT = _SHARED_HEADER + """
+MERGE — pattern recognition:
+
+GOOD merge signals:
+- discard_records belong under keep_tag's definition (or already have keep_tag).
+- Two tags near-synonymous.
+- High pre-existing overlap.
+
+BAD merge signals:
+- discard_records' semantics NOT covered by keep_tag — merge forces wrong concept.
+- Two tags address different facets of same area (different concerns).
+- discard_tag is large — dilutes keep_tag's specificity.
+
+DIG WALKTHROUGH:
+
+  Suppose the two tag names sound similar but you're not sure they truly
+  belong under one concept.
+
+  Step 1 — see records of the discard_tag in detail:
+    verdict=dig_deeper, dig_tool="inspect_records",
+    dig_args={{"record_ids": [<3-5 ids from discard_records_sample>]}}
+
+  After Step 1:
+  • Records' content clearly fits keep_tag's definition → approve
+  • Records have a distinct angle that keep_tag can't absorb → reject
+  • Still unsure, want to see overlap pattern → Step 2:
+
+  Step 2 — compare the two tags directly:
+    verdict=dig_deeper, dig_tool="compare_tags",
+    dig_args={{"tag_a": "<keep_tag>", "tag_b": "<discard_tag>"}}
+
+  After Step 2: MUST approve or reject.
+"""
+
+
+_PROMPT_BY_ACTION = {
+    "refine": _REFINE_PROMPT,
+    "split": _SPLIT_PROMPT,
+    "deprecate": _DEPRECATE_PROMPT,
+    "merge": _MERGE_PROMPT,
+}
+
+
+def _format_preview_block(state: BrainState) -> str:
+    """Render the current ticket's preview/diff for the specialist prompt."""
+    ticket = state.get("current_ticket")
+    if not ticket:
+        return "(no ticket)"
+    target = ticket.get("target", "")
+    action = ticket.get("action", "")
+    # Find the cached proposal for this ticket
+    pid = _find_proposal_for_target(state, target, action)
+    if pid is None:
+        return f"(no proposal in cache for {action} {target} — preview may have failed)"
+    proposal = state["proposal_cache"][pid]
+    # Try to get the latest preview result from working memory
+    preview_result = None
+    for tr in reversed(state.get("working", [])):
+        if tr.tool.startswith("propose_") and tr.tool.endswith("_preview"):
+            res = tr.result.get("result") if isinstance(tr.result, dict) else None
+            if isinstance(res, dict) and (res.get("proposal_id") == pid or res.get("tag_name") == target):
+                preview_result = res
+                break
+    if preview_result is None:
+        return f"(proposal {pid} cached but no preview result in working memory)"
+    # Render the diff in a readable form
+    lines = [f"proposal_id: {pid}"]
+    if "new_definition" in preview_result:
+        lines.append(f"new_definition: {preview_result['new_definition']}")
+    if "sub_tags" in preview_result:
+        lines.append(f"sub_tags: {preview_result['sub_tags']}")
+    if "keep_tag" in preview_result:
+        lines.append(f"keep_tag: {preview_result['keep_tag']}, discard_tag: {preview_result.get('discard_tag')}")
+    diff = preview_result.get("diff", {})
+    if diff:
+        lines.append(f"target_size_before: {diff.get('target_size_before')}")
+        lines.append(f"target_size_after: {diff.get('target_size_after')}")
+        lines.append(f"orphan_count: {diff.get('orphan_count')}")
+        lines.append(f"affected_record_count: {diff.get('affected_record_count')}")
+        record_diffs = diff.get("record_diffs", [])
+        if record_diffs:
+            lines.append(f"\nAffected records ({len(record_diffs)} shown):")
+            for rd in record_diffs:
+                lines.append(f"  id={rd.get('record_id')}")
+                if rd.get("title"):
+                    lines.append(f"     title: {rd['title']}")
+                if rd.get("insight_snippet"):
+                    lines.append(f"     insight: {rd['insight_snippet']}")
+                lines.append(
+                    f"     tags: {rd.get('before_tags')} → {rd.get('after_tags')}"
+                    f"{'  [ORPHAN]' if rd.get('becomes_orphan') else ''}"
+                )
+
+    # Action-specific samples
+    sub_tags = preview_result.get("sub_tags")
+    if sub_tags:
+        lines.append("\nSub-tag samples (split):")
+        for st in sub_tags:
+            lines.append(f"  --- {st.get('name')} (size {st.get('record_count')}) ---")
+            lines.append(f"     definition: {st.get('definition','')}")
+            for s in st.get("sample_records", []):
+                lines.append(f"     • {s.get('title')} — {s.get('insight_snippet','')[:120]}")
+
+    target_records_sample = preview_result.get("target_records_sample")
+    if target_records_sample:
+        lines.append("\nTarget records sample (deprecate):")
+        for s in target_records_sample:
+            lines.append(f"  • {s.get('title')} — {s.get('insight_snippet','')[:120]}")
+
+    discard_records_sample = preview_result.get("discard_records_sample")
+    if discard_records_sample:
+        lines.append("\nDiscard tag records sample (merge):")
+        for s in discard_records_sample:
+            lines.append(f"  • {s.get('title')} — {s.get('insight_snippet','')[:120]}")
+
+    return "\n".join(lines)
+
+
+def plan_node(state: BrainState) -> dict:
+    """Initial plan stage — seeds the plan_queue once at run start.
+
+    For now, plan is hardcoded for spike testing (ADR-0009 step C). Later this
+    will be replaced by a triage-driven or LLM-driven planner.
+    """
+    log = get_default_logger()
+    # Hardcoded ticket list for spike v19 — covers all 4 action types
+    hardcoded_plan = [
+        {"action": "refine", "target": "persistence_db"},
+        {"action": "split", "target": "langgraph_state"},
+        {"action": "deprecate", "target": "build_deployment"},
+        {"action": "refine", "target": "http_api"},
+        {"action": "merge", "target": "langgraph_state", "target_b": "llm_agent_runtime"},
+    ]
+    log.event("brain.plan_seeded", count=len(hardcoded_plan),
+              tickets=[f"{t['action']}({t['target']})" for t in hardcoded_plan])
+    return {"plan_queue": hardcoded_plan}
+
+
+def take_next_ticket_node(state: BrainState) -> dict:
+    """Pop next ticket from plan_queue, reset per-ticket state."""
+    log = get_default_logger()
+    queue = list(state.get("plan_queue", []))
+    if not queue:
+        log.event("brain.plan_exhausted")
+        return {"current_ticket": None, "stop_reason": "plan_exhausted"}
+    ticket = queue[0]
+    remaining = queue[1:]
+    log.event("brain.take_ticket", ticket=ticket, remaining=len(remaining))
+    return {
+        "current_ticket": ticket,
+        "plan_queue": remaining,
+        "dig_deeper_count": 0,
+        "prior_dig_keys": set(),
+        "working": [],
+        "tool_cache_this_round": {},
+        "proposed_subject_this_round": frozenset(),
+        "pending_decision": None,
+        "pending_tool": None,
+        "current_round": state.get("current_round", 0) + 1,
+    }
+
+
+def auto_preview_node(state: BrainState) -> dict:
+    """For the current ticket, automatically call the matching propose_*_preview."""
+    log = get_default_logger()
+    ticket = state.get("current_ticket") or {}
+    action = ticket.get("action", "")
+    target = ticket.get("target", "")
+
+    tool_map = {
+        "refine": "propose_refine_preview",
+        "split": "propose_split_preview",
+        "deprecate": "propose_deprecate_preview",
+        "merge": "propose_merge_preview",
+    }
+    tool_name = tool_map.get(action)
+    if not tool_name:
+        log.event("brain.auto_preview_unknown_action", action=action)
+        return {"pending_apply_outcome": f"unknown action: {action}"}
+
+    if action == "merge":
+        args = {"tag_a": target, "tag_b": ticket.get("target_b", "")}
+    else:
+        args = {"tag_name": target}
+
+    ctx = _state_to_context(state)
+    t0 = time.perf_counter()
+    tool_spec = TOOLS_BY_NAME[tool_name]
+    result = call_tool_with_cache(tool_spec, args, ctx)
+    elapsed = round(time.perf_counter() - t0, 2)
+
+    res_dict = result.get("result") if isinstance(result, dict) else None
+    is_success = isinstance(res_dict, dict) and res_dict.get("proposal_id")
+    log.event("brain.auto_preview", tool=tool_name, args=args,
+              success=bool(is_success), elapsed_s=elapsed)
+
+    # Record this tool call in working memory (so specialist prompt can render diff)
+    tr = ToolResult(tool=tool_name, args=args, result=result, round_idx=state.get("current_round", 0), timestamp="")
+
+    update: dict = {
+        "working": list(state.get("working", [])) + [tr],
+        "tool_cache_this_round": dict(ctx._tool_cache_this_round),
+    }
+    # Pull in any new proposals into state's cache
+    new_proposals = {
+        pid: p for pid, p in ctx.proposal_cache.items()
+        if pid not in state.get("proposal_cache", {})
+    }
+    if new_proposals:
+        update["proposal_cache"] = {"add": new_proposals}
+
+    # If propose failed (proposals=[]), record in episodic store for future runs
+    if not is_success and isinstance(res_dict, dict) and res_dict.get("proposals") == []:
+        action_for_store = _PROPOSE_ACTION_MAP.get(tool_name)
+        target_canon = _attempt_target_canonical(tool_name, args)
+        if action_for_store:
+            _record_failed_attempt(
+                state.get("run_id", "default"), action_for_store,
+                target_canon, res_dict.get("message", "judge rejected"),
+                state.get("current_round", 0),
+            )
+            update["excluded_attempts"] = set(state.get("excluded_attempts") or set()) | {(action_for_store, target_canon)}
+
+    return update
+
+
+def specialist_reason_node(state: BrainState) -> dict:
+    """LLM specialist reviews the (ticket, preview, diff) and outputs a verdict.
+
+    Selects the action-specific prompt (refine/split/deprecate/merge) so the
+    reviewer sees the right GOOD/BAD pattern recognition guidance.
+    """
+    log = get_default_logger()
+    ticket = state.get("current_ticket") or {}
+    action = ticket.get("action", "")
+    target = ticket.get("target", "")
+    if action == "merge":
+        target_display = f"{target} ↔ {ticket.get('target_b', '')}"
+    else:
+        target_display = target
+
+    preview_block = _format_preview_block(state)
+
+    prompt_template = _PROMPT_BY_ACTION.get(action)
+    if prompt_template is None:
+        log.event("brain.specialist_unknown_action", action=action)
+        return {"llm_call_count": 0, "pending_verdict": None}
+
+    user_msg = prompt_template.format(
+        action=action,
+        target=target_display,
+        preview_block=preview_block,
+    )
+
+    settings = Settings()
+    model = _chat_model(settings).with_structured_output(SpecialistVerdict)
+
+    t0 = time.perf_counter()
+    state_update_calls = state.get("llm_call_count", 0)
+    verdict: SpecialistVerdict | None = invoke_with_retry(
+        model,
+        [("system", "You are a careful, factual reviewer."), ("user", user_msg)],
+        retries=3,
+        caller=f"brain.specialist.t{state.get('current_round', 0)}",
+        logger=log,
+    )
+    elapsed = round(time.perf_counter() - t0, 2)
+
+    if verdict is None:
+        log.event("brain.specialist_failed", elapsed_s=elapsed)
+        return {"llm_call_count": 1, "pending_verdict": None}
+
+    log.event("brain.specialist_verdict",
+              ticket=ticket, verdict=verdict.verdict,
+              cited_facts=verdict.cited_facts,
+              elapsed_s=elapsed)
+    return {"llm_call_count": 1, "pending_verdict": verdict}
+
+
+def specialist_dig_inspect_node(state: BrainState) -> dict:
+    """Specialist requested dig_deeper — execute one read-only inspect tool.
+
+    Allowed dig tools: inspect_tag(tag_name) / compare_tags(tag_a, tag_b).
+    Debounces same (tool, args) combos within a ticket — returning a hint
+    instead of repeating the same query, which prevents the v20 R1 pattern
+    where specialist kept asking inspect_tag(persistence_db) and getting
+    the same 5 samples every time.
+    """
+    import json as _json
+    log = get_default_logger()
+    verdict = state.get("pending_verdict")
+    if verdict is None:
+        return {}
+
+    allowed = {"inspect_tag", "compare_tags", "inspect_records"}
+    dig_tool = verdict.dig_tool if verdict.dig_tool in allowed else "inspect_tag"
+    if not verdict.dig_args:
+        if dig_tool == "inspect_tag":
+            dig_args = {"tag_name": (state.get("current_ticket") or {}).get("target", ""), "n_samples": 20}
+        else:
+            dig_args = {}
+    else:
+        dig_args = dict(verdict.dig_args)
+
+    # Debounce: same (tool, args) within this ticket → return a hint, don't re-query
+    args_key = f"{dig_tool}|{_json.dumps(dig_args, sort_keys=True, default=str)}"
+    prior_keys = state.get("prior_dig_keys") or set()
+    if args_key in prior_keys:
+        log.event("brain.specialist_dig_debounced", tool=dig_tool, args=dig_args)
+        hint = ToolResult(
+            tool=dig_tool,
+            args=dig_args,
+            result={
+                "ok": False,
+                "result": None,
+                "error": "ALREADY_INSPECTED",
+                "message": (
+                    f"You already queried {dig_tool}({dig_args}). Same args produce "
+                    f"the same result — re-asking won't yield new info. Either query "
+                    f"with DIFFERENT args (different tag / different pair), or output "
+                    f"a verdict (approve/reject) based on current evidence."
+                ),
+            },
+            round_idx=state.get("current_round", 0),
+            timestamp="",
+        )
+        return {
+            "working": list(state.get("working", [])) + [hint],
+            "dig_deeper_count": state.get("dig_deeper_count", 0) + 1,
+            "pending_verdict": None,
+        }
+
+    ctx = _state_to_context(state)
+    tool_spec = TOOLS_BY_NAME.get(dig_tool)
+    if tool_spec is None or not dig_args:
+        log.event("brain.specialist_dig_invalid", dig_tool=dig_tool, dig_args=dig_args)
+        return {
+            "dig_deeper_count": state.get("dig_deeper_count", 0) + 1,
+            "pending_verdict": None,
+        }
+
+    t0 = time.perf_counter()
+    result = call_tool_with_cache(tool_spec, dig_args, ctx)
+    elapsed = round(time.perf_counter() - t0, 2)
+
+    log.event("brain.specialist_dig", tool=dig_tool, args=dig_args, elapsed_s=elapsed)
+
+    tr = ToolResult(
+        tool=dig_tool, args=dig_args, result=result,
+        round_idx=state.get("current_round", 0), timestamp="",
+    )
+    return {
+        "working": list(state.get("working", [])) + [tr],
+        "dig_deeper_count": state.get("dig_deeper_count", 0) + 1,
+        "prior_dig_keys": prior_keys | {args_key},
+        "pending_verdict": None,
+    }
+
+
+def route_after_take_ticket(state: BrainState) -> Literal["auto_preview", "end"]:
+    if state.get("current_ticket") is None:
+        return "end"
+    if state.get("current_round", 0) > state.get("max_rounds", 10):
+        return "end"
+    if state.get("llm_call_count", 0) >= state.get("cost_cap_calls", 60):
+        return "end"
+    return "auto_preview"
+
+
+def route_after_auto_preview(state: BrainState) -> Literal["specialist", "skip_ticket"]:
+    """If preview produced a usable proposal_id, go review; otherwise skip ticket."""
+    ticket = state.get("current_ticket") or {}
+    pid = _find_proposal_for_target(state, ticket.get("target", ""), ticket.get("action", ""))
+    if pid is None:
+        return "skip_ticket"
+    return "specialist"
+
+
+def route_after_specialist(state: BrainState) -> Literal["approve_path", "dig", "forced_commit", "skip_ticket"]:
+    verdict = state.get("pending_verdict")
+    if verdict is None:
+        return "skip_ticket"
+    if verdict.verdict == "approve":
+        return "approve_path"
+    if verdict.verdict == "dig_deeper":
+        if state.get("dig_deeper_count", 0) >= 2:
+            # Out of dig budget — give the specialist one last forced commit
+            # call (cannot pick dig_deeper) rather than auto-rejecting.
+            return "forced_commit"
+        return "dig"
+    return "skip_ticket"  # reject (explicit reject from specialist)
+
+
+def forced_commit_node(state: BrainState) -> dict:
+    """Dig budget exhausted but specialist still wants more info. Force a final
+    approve/reject verdict — uncertainty is OK in reasoning, but no more digs.
+    """
+    log = get_default_logger()
+    ticket = state.get("current_ticket") or {}
+    action = ticket.get("action", "")
+    target = ticket.get("target", "")
+    if action == "merge":
+        target_display = f"{target} ↔ {ticket.get('target_b', '')}"
+    else:
+        target_display = target
+
+    preview_block = _format_preview_block(state)
+    # Show working memory's dig results so the model has all gathered evidence
+    working = state.get("working", [])
+    dig_log_lines = []
+    for tr in working:
+        if tr.tool in {"inspect_records", "inspect_tag", "compare_tags"}:
+            res = tr.result.get("result") if isinstance(tr.result, dict) else None
+            dig_log_lines.append(f"  {tr.tool}({tr.args}) → {str(res)[:600]}")
+    dig_log = "\n".join(dig_log_lines) if dig_log_lines else "(none)"
+
+    forced_msg = f"""You are a specialist reviewer. You have exhausted your dig budget for this
+ticket. You MUST output a final verdict: approve OR reject. dig_deeper is NOT
+allowed.
+
+TICKET:
+  action: {action}
+  target: {target_display}
+
+PREVIEW + DIFF:
+{preview_block}
+
+YOUR PRIOR DIG RESULTS:
+{dig_log}
+
+INSTRUCTIONS:
+- Decide approve or reject based on the evidence above.
+- It is OK to acknowledge uncertainty in `reasoning`. The system requires
+  a binary verdict, not absolute certainty.
+- General heuristic: if no clear deal-breaker (orphan_count>0, samples
+  contradicting the proposed definition, etc.) was uncovered, lean approve.
+  If you found at least one concrete problem the proposal does not address,
+  reject and cite it.
+- cited_facts MUST reference concrete data from preview OR your dig results.
+
+Output ForcedCommitVerdict: verdict (approve|reject), reasoning, cited_facts.
+"""
+
+    settings = Settings()
+    model = _chat_model(settings).with_structured_output(ForcedCommitVerdict)
+    t0 = time.perf_counter()
+    forced: ForcedCommitVerdict | None = invoke_with_retry(
+        model,
+        [("system", "You are forced to deliver a final binary verdict."), ("user", forced_msg)],
+        retries=3,
+        caller=f"brain.forced_commit.t{state.get('current_round', 0)}",
+        logger=log,
+    )
+    elapsed = round(time.perf_counter() - t0, 2)
+
+    if forced is None:
+        log.event("brain.forced_commit_failed", elapsed_s=elapsed)
+        return {"llm_call_count": 1, "pending_verdict": None}
+
+    log.event("brain.forced_commit", ticket=ticket, verdict=forced.verdict,
+              cited_facts=forced.cited_facts, elapsed_s=elapsed)
+    # Convert to SpecialistVerdict shape so downstream nodes work unchanged
+    verdict = SpecialistVerdict(
+        verdict=forced.verdict, reasoning=forced.reasoning,
+        cited_facts=forced.cited_facts, dig_tool="", dig_args={},
+    )
+    return {"llm_call_count": 1, "pending_verdict": verdict}
+
+
+def route_after_forced_commit(state: BrainState) -> Literal["approve_path", "skip_ticket"]:
+    verdict = state.get("pending_verdict")
+    if verdict is None:
+        return "skip_ticket"
+    if verdict.verdict == "approve":
+        return "approve_path"
+    return "skip_ticket"
+
+
+def approve_to_decision_node(state: BrainState) -> dict:
+    """Translate specialist's 'approve' verdict into an AgentDecision so the
+    existing verify/gate/apply pipeline can run unchanged."""
+    ticket = state.get("current_ticket") or {}
+    verdict = state.get("pending_verdict")
+    decision = AgentDecision(
+        action=ticket.get("action", "inspect_more"),
+        target=ticket.get("target", ""),
+        reasoning=(verdict.reasoning if verdict else "approved by specialist"),
+        certainty="high",
+        supporting_observations=(verdict.cited_facts if verdict and verdict.cited_facts else ["specialist approved"]),
+        preview_reviewed=True,
+        affected_records_estimate=0,
+        reversibility=REVERSIBILITY_DEFAULTS.get(ticket.get("action", ""), "clean_rollback"),
+    )
+    return {"pending_decision": decision}
+
+
+def ticket_archive_node(state: BrainState) -> dict:
+    """Archive ticket outcome (replaces archive_node for plan-execute)."""
+    log = get_default_logger()
+    ticket = state.get("current_ticket") or {}
+    verdict = state.get("pending_verdict")
+    decision = state.get("pending_decision")
+    gate = state.get("pending_gate")
+    apply_outcome = state.get("pending_apply_outcome")
+
+    tools_called = [tr.tool for tr in state.get("working", [])]
+
+    committed = False
+    outcome_str: str | None = None
+    if verdict and verdict.verdict == "reject":
+        outcome_str = f"specialist rejected: {verdict.reasoning[:100]}"
+    elif verdict and verdict.verdict == "dig_deeper" and state.get("dig_deeper_count", 0) >= 2:
+        outcome_str = "dig_deeper budget exhausted, ticket skipped"
+    elif apply_outcome and apply_outcome.startswith("applied"):
+        outcome_str = apply_outcome
+        committed = True
+    elif gate and gate.result == GateResult.REVIEW:
+        outcome_str = f"gate=REVIEW ({gate.reason})"
+    elif apply_outcome:
+        outcome_str = apply_outcome
+    else:
+        outcome_str = "skipped (no preview or other reason)"
+
+    round_summary = RoundSummary(
+        round_idx=state.get("current_round", 0),
+        tools_called=tools_called,
+        target=ticket.get("target", "") or None,
+        decision_action=ticket.get("action", "") or None,
+        decision_certainty=("approved" if verdict and verdict.verdict == "approve" else
+                            ("rejected" if verdict and verdict.verdict == "reject" else None)),
+        outcome=outcome_str,
+        committed=committed,
+        rolled_back=False,
+    )
+
+    decision_record = {
+        "round": state.get("current_round", 0),
+        "ticket": ticket,
+        "verdict": (verdict.model_dump() if verdict else None),
+        "decision": (decision.model_dump() if decision else None),
+        "gate": ({"result": gate.result.value, "triggered": gate.triggered_gates, "reason": gate.reason} if gate else None),
+        "committed": committed,
+        "outcome": outcome_str,
+    }
+
+    log.event("brain.ticket_done",
+              ticket=ticket, committed=committed, outcome=outcome_str)
+
+    return {
+        "history": [round_summary],
+        "decisions": [decision_record],
+        "current_ticket": None,
+        "pending_decision": None,
+        "pending_gate": None,
+        "pending_apply_outcome": None,
+        "pending_verdict": None,
+    }
+
+
+# Helper import for approve_to_decision_node
+from .decision import REVERSIBILITY_DEFAULTS
+
+
 # ── Graph construction ────────────────────────────────────────────────────
 
 
 def build_graph(checkpointer=None, store: BaseStore | None = None):
+    """Plan-execute graph (ADR-0009).
+
+    START → plan → take_next ──(queue empty/budget)──→ END
+                       │
+                       └→ auto_preview → specialist
+                                         (verdict)
+                                          │
+              ┌───────────────────────────┼──────────────────┐
+              │                           │                  │
+           approve                    dig_deeper          reject
+              │                           │                  │
+        approve_to_decision         dig_inspect         (skip)
+              │                           │                  │
+            verify                  back to specialist      │
+              │                                              │
+             gate                                            │
+              │                                              │
+            apply                                            │
+              │                                              │
+              └──────────────→ ticket_archive ←──────────────┘
+                                       │
+                                       └→ take_next (loop)
+    """
     global _episodic_store
     _episodic_store = store if store is not None else InMemoryStore()
 
     g = StateGraph(BrainState)
 
-    g.add_node("orient", orient_node)
-    g.add_node("reason", reason_node)
-    g.add_node("tool", tool_node)
-    g.add_node("forced_preview", forced_preview_node)
-    g.add_node("forced_decide", forced_decide_node)
+    g.add_node("plan", plan_node)
+    g.add_node("take_next", take_next_ticket_node)
+    g.add_node("auto_preview", auto_preview_node)
+    g.add_node("specialist", specialist_reason_node)
+    g.add_node("dig_inspect", specialist_dig_inspect_node)
+    g.add_node("forced_commit", forced_commit_node)
+    g.add_node("approve_to_decision", approve_to_decision_node)
     g.add_node("verify", verify_node)
     g.add_node("gate", gate_node)
     g.add_node("apply", apply_node)
-    g.add_node("archive", archive_node)
+    g.add_node("ticket_archive", ticket_archive_node)
 
-    g.add_edge(START, "orient")
-    g.add_edge("orient", "reason")
+    g.add_edge(START, "plan")
+    g.add_edge("plan", "take_next")
     g.add_conditional_edges(
-        "reason",
-        route_after_reason,
-        {"tool": "tool", "verify": "verify", "forced_decide": "forced_decide", "end": END},
+        "take_next",
+        route_after_take_ticket,
+        {"auto_preview": "auto_preview", "end": END},
     )
     g.add_conditional_edges(
-        "tool",
-        route_after_tool,
-        {"reason": "reason", "forced_preview": "forced_preview", "forced_decide": "forced_decide"},
+        "auto_preview",
+        route_after_auto_preview,
+        {"specialist": "specialist", "skip_ticket": "ticket_archive"},
     )
     g.add_conditional_edges(
-        "forced_preview",
-        route_after_forced_preview,
-        {"tool": "tool", "forced_decide": "forced_decide"},
+        "specialist",
+        route_after_specialist,
+        {"approve_path": "approve_to_decision", "dig": "dig_inspect",
+         "forced_commit": "forced_commit", "skip_ticket": "ticket_archive"},
     )
+    g.add_edge("dig_inspect", "specialist")  # back to reasoning
     g.add_conditional_edges(
-        "forced_decide",
-        route_after_forced_decide,
-        {"verify": "verify", "archive": "archive"},
+        "forced_commit",
+        route_after_forced_commit,
+        {"approve_path": "approve_to_decision", "skip_ticket": "ticket_archive"},
     )
+    g.add_edge("approve_to_decision", "verify")
     g.add_edge("verify", "gate")
     g.add_conditional_edges(
         "gate",
         route_after_gate,
-        {"apply": "apply", "archive": "archive"},
+        {"apply": "apply", "archive": "ticket_archive"},
     )
-    g.add_edge("apply", "archive")
-    g.add_conditional_edges(
-        "archive",
-        route_after_archive,
-        {"orient": "orient", "end": END},
-    )
+    g.add_edge("apply", "ticket_archive")
+    g.add_edge("ticket_archive", "take_next")
 
     return g.compile(checkpointer=checkpointer)
 
@@ -923,6 +1705,12 @@ def run_brain_graph(
         "llm_call_count": 0,
         "applied_count": 0,
         "stop_reason": "",
+        # plan-execute (ADR-0009)
+        "plan_queue": [],
+        "current_ticket": None,
+        "dig_deeper_count": 0,
+        "prior_dig_keys": set(),
+        "pending_verdict": None,
     }
 
     graph = build_graph()

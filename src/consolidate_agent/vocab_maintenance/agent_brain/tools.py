@@ -61,14 +61,19 @@ def _lock_subject(ctx: BrainContext, subject: frozenset) -> None:
     ctx._proposed_subject_this_round = subject
 
 
-def _simulate_diff(ctx: BrainContext, proposal, affected_tag_for_size: str | None) -> dict:
+def _simulate_diff(
+    ctx: BrainContext, proposal, affected_tag_for_size: str | None,
+    sample_size: int = 10,
+) -> dict:
     """Sandbox-apply the proposal on a copy and compute a before/after diff.
 
-    Returns a structured diff containing per-record tag changes (for affected
-    records only) and target-tag size before/after. No mutation of ctx.
+    record_diffs are capped at `sample_size` and enriched with title + insight
+    snippet from the DB so the specialist reviewer can see records' actual
+    semantics — not just record_ids and tag lists.
     """
     from copy import deepcopy
     from consolidate_agent.vocab_maintenance.apply import apply_proposal
+    from consolidate_agent.vocab_maintenance.probes import _load_record_details
 
     try:
         sandbox_vocab = deepcopy(ctx.vocab)
@@ -79,7 +84,6 @@ def _simulate_diff(ctx: BrainContext, proposal, affected_tag_for_size: str | Non
     except Exception as e:
         return {"sandbox_error": str(e)[:200]}
 
-    # Build lookup of new tag sets per record
     new_by_id = {a["record_id"]: a for a in new_assignments}
 
     record_diffs: list[dict] = []
@@ -95,13 +99,12 @@ def _simulate_diff(ctx: BrainContext, proposal, affected_tag_for_size: str | Non
             if new_a else []
         )
         if set(before) != set(after):
-            entry = {
+            record_diffs.append({
                 "record_id": rid,
                 "before_tags": before,
                 "after_tags": after,
                 "becomes_orphan": len(after) == 0,
-            }
-            record_diffs.append(entry)
+            })
             if len(after) == 0:
                 orphan_count += 1
 
@@ -116,13 +119,40 @@ def _simulate_diff(ctx: BrainContext, proposal, affected_tag_for_size: str | Non
             if not a.get("missing") and any(t["name"] == affected_tag_for_size for t in a.get("selected_tags", []))
         )
 
+    # Enrich the sample with record content (title + insight snippet) so the
+    # specialist can audit semantic appropriateness, not just structural fit.
+    sample = record_diffs[:sample_size]
+    if sample:
+        details = _load_record_details(ctx.db_path, [r["record_id"] for r in sample])
+        for r in sample:
+            d = details.get(r["record_id"], {})
+            r["title"] = (d.get("title") or "")[:120]
+            r["insight_snippet"] = (d.get("insight") or "")[:500]
+
     return {
         "target_size_before": target_before,
         "target_size_after": target_after,
         "affected_record_count": len(record_diffs),
         "orphan_count": orphan_count,
-        "record_diffs": record_diffs[:15],   # cap to keep prompt reasonable
+        "record_diffs": sample,
     }
+
+
+def _enrich_sample_records(db_path, record_ids: list[str], limit: int = 5) -> list[dict]:
+    """Helper for action-specific sample blocks: fetch title + insight for records."""
+    from consolidate_agent.vocab_maintenance.probes import _load_record_details
+    ids = list(record_ids)[:limit]
+    if not ids:
+        return []
+    details = _load_record_details(db_path, ids)
+    return [
+        {
+            "record_id": rid,
+            "title": (details.get(rid, {}).get("title") or "")[:120],
+            "insight_snippet": (details.get(rid, {}).get("insight") or "")[:500],
+        }
+        for rid in ids
+    ]
 
 
 # ── impl functions ────────────────────────────────────────────────────────────
@@ -208,6 +238,46 @@ def _impl_inspect_tag(args: dict, ctx: BrainContext) -> dict:
         return _err(f"inspect_tag({tag_name}) failed: {e}")
 
 
+def _impl_inspect_records(args: dict, ctx: BrainContext) -> dict:
+    """Return full content + current tag membership for specific record_ids.
+
+    Designed for the specialist reviewer to audit a small set of records
+    (e.g., a proposal's prune list) when title+snippet in the preview
+    aren't enough to judge semantic appropriateness.
+    """
+    from consolidate_agent.vocab_maintenance.probes import _load_record_details
+
+    record_ids = args.get("record_ids") or []
+    if isinstance(record_ids, str):
+        # tolerate accidental scalar input
+        record_ids = [record_ids]
+    if not record_ids:
+        return _err("record_ids is required (list of record_id strings)")
+    ids = list(record_ids)[:10]  # cap to avoid prompt overflow
+
+    try:
+        details = _load_record_details(ctx.db_path, ids)
+    except Exception as e:
+        return _err(f"inspect_records failed: {e}")
+
+    by_id = {a["record_id"]: a for a in ctx.assignments}
+    out = []
+    for rid in ids:
+        d = details.get(rid, {})
+        a = by_id.get(rid, {})
+        out.append({
+            "record_id": rid,
+            "title": d.get("title", "")[:200],
+            "insight": (d.get("insight") or "")[:1500],
+            "current_matter_tags": [t["name"] for t in a.get("selected_tags", [])],
+            "lesson_type": a.get("lesson_type", ""),
+        })
+    return _ok({
+        "queried": len(ids),
+        "records": out,
+    })
+
+
 def _impl_compare_tags(args: dict, ctx: BrainContext) -> dict:
     from consolidate_agent.vocab_maintenance.probes import compare_tag_records
 
@@ -248,6 +318,9 @@ def _impl_propose_split_preview(args: dict, ctx: BrainContext) -> dict:
                 "name": st["name"],
                 "definition": st["definition"],
                 "record_count": len(st["record_ids"]),
+                # 5 sample records per sub-tag so the reviewer can audit semantic
+                # cohesion of each split partition.
+                "sample_records": _enrich_sample_records(ctx.db_path, st["record_ids"], limit=5),
             }
             for st in proposal.sub_tags
         ]
@@ -334,6 +407,11 @@ def _impl_propose_deprecate_preview(args: dict, ctx: BrainContext) -> dict:
 
         if isinstance(proposal, MergeProposal):
             diff = _simulate_diff(ctx, proposal, proposal.discard_tag)
+            # Show what records currently sit under the soon-to-be-discarded tag.
+            discard_records_ids = [
+                a["record_id"] for a in ctx.assignments
+                if not a.get("missing") and any(t["name"] == proposal.discard_tag for t in a.get("selected_tags", []))
+            ]
             return _ok({
                 "tag_name": tag_name,
                 "proposal_id": proposal_id,
@@ -342,6 +420,7 @@ def _impl_propose_deprecate_preview(args: dict, ctx: BrainContext) -> dict:
                 "discard_tag": proposal.discard_tag,
                 "affected_record_count": len(affected_records),
                 "note": "judge recommended merge_to instead of deprecate",
+                "discard_records_sample": _enrich_sample_records(ctx.db_path, discard_records_ids, limit=8),
                 "diff": diff,
             })
         diff = _simulate_diff(ctx, proposal, tag_name)
@@ -352,6 +431,8 @@ def _impl_propose_deprecate_preview(args: dict, ctx: BrainContext) -> dict:
             "affected_record_count": len(affected_records),
             "orphan_count": orphan_count,
             "note": f"{orphan_count} records would lose their only matter tag if deprecated",
+            # Show what records this tag currently holds — to judge whether tag truly is dispensable.
+            "target_records_sample": _enrich_sample_records(ctx.db_path, affected_records, limit=8),
             "diff": diff,
         })
     except Exception as e:
@@ -397,6 +478,7 @@ def _impl_propose_merge_preview(args: dict, ctx: BrainContext) -> dict:
             "keep_tag": keep,
             "discard_tag": discard,
             "affected_record_count": len(affected),
+            "discard_records_sample": _enrich_sample_records(ctx.db_path, affected, limit=8),
             "diff": diff,
         })
     except Exception as e:
@@ -497,6 +579,24 @@ TOOLS: list[ToolSpec] = [
         },
         output_keys=["name", "definition", "usage_count", "coherence", "sample_records", "neighbor_tags"],
         impl=_impl_inspect_tag,
+    ),
+    ToolSpec(
+        name="inspect_records",
+        description=(
+            "Return full title + insight + current matter tags for specific record_ids. "
+            "Use when you need to audit a small set of records' actual semantics — "
+            "e.g., the prune list of a refine proposal, to verify each record really "
+            "is off-topic. Capped at 10 records per call."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "record_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["record_ids"],
+        },
+        output_keys=["queried", "records"],
+        impl=_impl_inspect_records,
     ),
     ToolSpec(
         name="compare_tags",

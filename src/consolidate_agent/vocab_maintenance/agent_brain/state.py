@@ -110,6 +110,7 @@ class BrainState(TypedDict, total=False):
     pending_decision: Any       # AgentDecision | None — set by reason, transformed by verify, read by gate
     pending_gate: Any           # GateDecision | None — set by gate_node, read by apply/archive
     pending_apply_outcome: Any  # str | None — set by apply_node, read by archive_node
+    pending_verdict: Any        # SpecialistVerdict | None — set by specialist_reason_node
 
     # ── cross-round memory ────────────────────────────────────────────────
     history: Annotated[list, _append_bounded(_HISTORY_MAX)]
@@ -118,6 +119,12 @@ class BrainState(TypedDict, total=False):
 
     # ── episodic memory snapshot (read from store at orient_node) ────────
     excluded_attempts: Any  # set[tuple[action, target_canonical]] — failed (action, target) combinations this run
+
+    # ── plan-execute architecture (ADR-0009) ─────────────────────────────
+    plan_queue: list  # list of ticket dicts: {"action": "refine"/"split"/..., "target": "tag_name", "target_b": "..." (for merge)}
+    current_ticket: Any  # dict | None — the ticket being worked on
+    dig_deeper_count: int  # resets per ticket; capped to prevent infinite inspect loops
+    prior_dig_keys: Any  # set[str] — (tool, args) combos already dug this ticket; reset per ticket
 
     # ── control ──────────────────────────────────────────────────────────
     llm_call_count: Annotated[int, _increment]
