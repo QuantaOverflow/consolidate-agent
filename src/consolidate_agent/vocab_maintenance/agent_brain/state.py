@@ -116,6 +116,9 @@ class BrainState(TypedDict, total=False):
     facts: Annotated[list, _append_bounded(_FACTS_MAX)]
     decisions: Annotated[list, _append]  # audit trail — every decision + gate verdict
 
+    # ── episodic memory snapshot (read from store at orient_node) ────────
+    excluded_attempts: Any  # set[tuple[action, target_canonical]] — failed (action, target) combinations this run
+
     # ── control ──────────────────────────────────────────────────────────
     llm_call_count: Annotated[int, _increment]
     applied_count: Annotated[int, _increment]

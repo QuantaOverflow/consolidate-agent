@@ -82,7 +82,7 @@ class TriageReport:
 
 
 def _signal_priority(t: TagTriage) -> tuple[int, int, int]:
-    conf_rank = {"high": 0, "medium": 1, "low": 2, "n/a": 3}.get(
+    conf_rank = {"high": 0, "medium": 1, "low": 2, "n/a": 3, "exhausted": 4}.get(
         t.suggestion_confidence, 3
     )
     return (conf_rank, -len(t.signals), -t.size)
@@ -186,8 +186,18 @@ def compute_triage(
     db_path: Path,
     *,
     recently_modified: set[str] | None = None,
+    excluded_attempts: set[tuple[str, str]] | None = None,
 ) -> TriageReport:
+    """Compute triage report.
+
+    excluded_attempts: set of (action, target_canonical) tuples that have been
+    proposed and rejected by the judge earlier in this run. For tags where the
+    triage's suggested_action matches an excluded attempt, the suggestion is
+    downgraded to None with a 'tried_and_rejected' marker, so the LLM still
+    sees the tag but knows that path is closed.
+    """
     recently_modified = recently_modified or set()
+    excluded_attempts = excluded_attempts or set()
 
     # per-tag counts
     tag_size: dict[str, int] = defaultdict(int)
@@ -247,6 +257,17 @@ def compute_triage(
             top_neighbors=neighbors,
             recently_modified=(name in recently_modified),
         )
+        # If the suggested action was tried and the judge rejected it earlier
+        # this run, mark this candidate as exhausted so the LLM doesn't retry.
+        if t.suggested_action and (t.suggested_action, name) in excluded_attempts:
+            t = TagTriage(
+                name=t.name, size=t.size, coherence=t.coherence,
+                high_conf_ratio=t.high_conf_ratio, top_neighbors=t.top_neighbors,
+                signals=list(t.signals) + ["tried_and_rejected"],
+                suggested_action=None,
+                suggestion_confidence="exhausted",
+                rationale=f"tried `{t.suggested_action}` earlier this run, judge rejected — skip this combination",
+            )
         if t.signals:
             candidates.append(t)
         else:

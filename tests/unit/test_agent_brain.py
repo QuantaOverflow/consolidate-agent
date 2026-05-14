@@ -213,33 +213,6 @@ def test_stop_always_auto():
     assert "stop_always_auto" in gd.triggered_gates
 
 
-def test_irreversible_always_review():
-    mem = _make_memory()
-    d = _make_clean_decision()
-    d = d.model_copy(update={"reversibility": "irreversible"})
-    gd = gate_decision(d, mem)
-    assert gd.result == GateResult.REVIEW
-    assert "irreversible_always_review" in gd.triggered_gates
-
-
-def test_low_certainty_review():
-    mem = _make_memory()
-    d = _make_clean_decision()
-    d = d.model_copy(update={"certainty": "low"})
-    gd = gate_decision(d, mem)
-    assert gd.result == GateResult.REVIEW
-    assert "low_certainty" in gd.triggered_gates
-
-
-def test_insufficient_evidence_review():
-    mem = _make_memory()
-    d = _make_clean_decision()
-    d = d.model_copy(update={"supporting_observations": ["only_one"]})
-    gd = gate_decision(d, mem)
-    assert gd.result == GateResult.REVIEW
-    assert "insufficient_evidence" in gd.triggered_gates
-
-
 def test_high_impact_no_preview_review():
     mem = _make_memory()
     d = _make_clean_decision()

@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.store.base import BaseStore
+from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel, Field
 
 from consolidate_agent.config import Settings
@@ -54,6 +56,52 @@ from .memory import RoundSummary, ToolResult, _detect_critical_patterns, Network
 from .state import BrainState
 from .tools import TOOLS, TOOLS_BY_NAME, BrainContext, call_tool_with_cache
 from .triage import compute_triage
+
+
+# ── Episodic memory store (module-level; set by build_graph) ──────────────
+
+
+_episodic_store: BaseStore | None = None
+
+
+_PROPOSE_ACTION_MAP = {
+    "propose_split_preview": "split",
+    "propose_refine_preview": "refine",
+    "propose_deprecate_preview": "deprecate",
+    "propose_merge_preview": "merge",
+}
+
+
+def _attempt_target_canonical(tool_name: str, args: dict) -> str:
+    """Canonical string for an attempt subject so equal subjects match in set lookup."""
+    if tool_name == "propose_merge_preview":
+        a, b = args.get("tag_a", ""), args.get("tag_b", "")
+        return ",".join(sorted([a, b]))
+    return args.get("tag_name", "")
+
+
+def _record_failed_attempt(run_id: str, action: str, target: str, reason: str, round_idx: int) -> None:
+    if _episodic_store is None:
+        return
+    _episodic_store.put(
+        ("attempts", run_id),
+        f"{action}|{target}",
+        {"action": action, "target": target, "reason": reason, "round": round_idx},
+    )
+
+
+def _read_excluded_attempts(run_id: str) -> set[tuple[str, str]]:
+    if _episodic_store is None:
+        return set()
+    try:
+        items = _episodic_store.search(("attempts", run_id))
+    except Exception:
+        return set()
+    excluded: set[tuple[str, str]] = set()
+    for item in items:
+        v = item.value
+        excluded.add((v["action"], v["target"]))
+    return excluded
 
 
 # ── BrainStep schema (LLM output) ─────────────────────────────────────────
@@ -101,6 +149,16 @@ YOU HAVE TOOLS to explore and act. On each step, you decide:
 - (mode="call_tool"): call one tool to gather information
 - (mode="decide"): output an AgentDecision (action + reasoning + certainty + evidence)
 
+ACTION OVER INVESTIGATION:
+Your tool budget per round is TIGHT (typically 3 tools). Spending the whole budget
+on inspect_tag of multiple tags without calling propose_*_preview wastes the round —
+the gate will REVIEW any decision without a cached proposal, producing zero commits.
+
+A healthy round costs at most: inspect_tag (1) → propose_*_preview (1) → decide.
+If triage gives a high-confidence suggestion, you MAY skip inspect and go directly
+to propose_*_preview. Aim for at least one commit per round when triage shows
+medium-or-better candidates available.
+
 OPERATING PRINCIPLES:
 1. A `=== Network triage ===` section at the top of context lists action candidates
    already prioritized by deterministic signals (coherence, size, neighbor overlap,
@@ -121,8 +179,27 @@ OPERATING PRINCIPLES:
 7. If a `propose_*_preview` returns `proposals=[]` or `"no ... proposed"`, the
    judge has REJECTED this action. Do NOT call the same preview again — pick a
    different action or end with action="inspect_more" / "stop".
+   The triage report marks such combinations with `suggestion_confidence=exhausted`
+   and signal `tried_and_rejected` — skip them; the tool will also short-circuit
+   if you try again, costing you a wasted slot in your tool budget.
 8. Output action="stop" when remaining triage candidates are all `suggestion_confidence=low`
    OR you've already addressed all high/medium-confidence candidates.
+
+APPLY BEHAVIOR (what the system actually does):
+  refine:    changes target tag's DEFINITION + REMOVES target tag from prune-list records.
+             Does NOT add records to any other tag.
+  deprecate: REMOVES target tag from all its records. Does NOT redirect them.
+  split:     splits target into sub-tags, reassigns records to sub-tags by similarity.
+  merge:     records of discard_tag get keep_tag added; discard_tag is removed.
+
+PREVIEW SHOWS YOU REAL DIFFS, NOT YOUR GUESS:
+  Each `propose_*_preview` returns concrete before/after data:
+    - target tag size before/after
+    - for each prune/affected record: its tag set before vs after
+    - orphan count (records that would lose their last matter tag)
+  Read these facts and base your `reasoning` on them. There is no need to
+  guess or describe "expected outcome" — the preview shows you the actual outcome
+  if you commit.
 
 TOOL LIST:
 {tools_description}
@@ -130,13 +207,12 @@ TOOL LIST:
 DECISION SCHEMA (use when mode="decide"):
 - action: one of split / merge / refine / deprecate / inspect_more / stop
 - target: tag name (or "" for stop)
-- reasoning: 80-2000 chars
+- reasoning: 80-2000 chars — cite specific facts from preview's before/after diff
 - certainty: high / medium / low
-- supporting_observations: cite specific tool outputs
+- supporting_observations: cite specific tool outputs (preview diffs, inspect samples)
 - opposing_observations: any reasons this might not work
 - preview_reviewed: True only if you called propose_*_preview
 - affected_records_estimate: how many records you expect to change
-- expected_outcome: qualitative semantic prediction
 
 OUTPUT ONE BrainStep PER TURN. Set mode to either "call_tool" or "decide".
 
@@ -251,10 +327,16 @@ def _compute_real_affected(proposal, state: BrainState) -> int:
 
 
 def orient_node(state: BrainState) -> dict:
-    """Round-start: recompute triage with recently_modified set, clear round-local state."""
+    """Round-start: recompute triage with recently_modified + excluded_attempts, clear round-local."""
     log = get_default_logger()
     round_idx = state.get("current_round", 0)
+    run_id = state.get("run_id", "default")
     log.event("brain.round_start", round_idx=round_idx)
+
+    excluded = _read_excluded_attempts(run_id)
+    if excluded:
+        log.event("brain.excluded_attempts", round_idx=round_idx, count=len(excluded),
+                  attempts=[f"{a}({t})" for a, t in sorted(excluded)])
 
     try:
         modified_tags = {
@@ -264,6 +346,7 @@ def orient_node(state: BrainState) -> dict:
         triage = compute_triage(
             state["vocab"], state["assignments"], Path(state["db_path"]),
             recently_modified=modified_tags,
+            excluded_attempts=excluded,
         )
     except Exception as e:
         log.event("brain.triage_failed", round_idx=round_idx, error=str(e)[:200])
@@ -271,6 +354,7 @@ def orient_node(state: BrainState) -> dict:
 
     return {
         "triage_report": triage,
+        "excluded_attempts": excluded,
         "round_tool_count": 0,
         "proposed_subject_this_round": frozenset(),
         "tool_cache_this_round": {},
@@ -331,30 +415,77 @@ def reason_node(state: BrainState) -> dict:
 
 
 def tool_node(state: BrainState) -> dict:
-    """Execute the pending tool, update working + proposal_cache + locks."""
+    """Execute the pending tool, update working + proposal_cache + locks.
+
+    Short-circuits propose_*_preview calls whose (action, target) was already
+    rejected by the judge earlier this run — returns cached failure instead
+    of spending another LLM call on the same dead path.
+    """
     log = get_default_logger()
     round_idx = state.get("current_round", 0)
+    run_id = state.get("run_id", "default")
     pending = state.get("pending_tool")
     if not pending:
         return {"pending_tool": None}
     tool_name, tool_args = pending
 
     tool_spec = TOOLS_BY_NAME.get(tool_name)
+    ctx = None  # set below if we actually invoke the tool
+    short_circuited = False
+
     if tool_spec is None:
         result = {"ok": False, "result": None, "error": f"unknown tool: {tool_name}"}
         log.event("brain.tool_call", round_idx=round_idx, tool=tool_name, args=tool_args,
                   result_summary="unknown tool", elapsed_s=0.0)
     else:
-        ctx = _state_to_context(state)
-        t1 = time.perf_counter()
-        result = call_tool_with_cache(tool_spec, tool_args, ctx)
-        tool_elapsed = round(time.perf_counter() - t1, 2)
-        summary = (
-            str(result.get("result", result.get("error", "")))[:120]
-            if isinstance(result, dict) else str(result)[:120]
-        )
-        log.event("brain.tool_call", round_idx=round_idx, tool=tool_name, args=tool_args,
-                  result_summary=summary, elapsed_s=tool_elapsed)
+        # Episodic-memory short-circuit: skip propose_*_preview for (action, target) already rejected.
+        action = _PROPOSE_ACTION_MAP.get(tool_name)
+        target_canon = _attempt_target_canonical(tool_name, tool_args) if action else ""
+        excluded: set = state.get("excluded_attempts") or set()
+        if action and (action, target_canon) in excluded:
+            short_circuited = True
+            result = {
+                "ok": True,
+                "result": {
+                    "tag_name": target_canon, "proposals": [],
+                    "message": (
+                        f"already tried {action} on `{target_canon}` this run — "
+                        f"judge rejected; will not retry. Pick a different action or target."
+                    ),
+                },
+                "error": None,
+            }
+            log.event("brain.tool_short_circuit", round_idx=round_idx, tool=tool_name,
+                      args=tool_args, action=action, target=target_canon)
+        else:
+            ctx = _state_to_context(state)
+            t1 = time.perf_counter()
+            result = call_tool_with_cache(tool_spec, tool_args, ctx)
+            tool_elapsed = round(time.perf_counter() - t1, 2)
+            # propose_* tools produce the proposal artifact we need for downstream
+            # judge review — log the full result, not a 120-char preview.
+            is_propose = tool_name.startswith("propose_") and tool_name.endswith("_preview")
+            truncate = 4000 if is_propose else 120
+            summary = (
+                str(result.get("result", result.get("error", "")))[:truncate]
+                if isinstance(result, dict) else str(result)[:truncate]
+            )
+            log.event("brain.tool_call", round_idx=round_idx, tool=tool_name, args=tool_args,
+                      result_summary=summary, elapsed_s=tool_elapsed)
+
+            # If propose_* returned no proposal, record the failure to episodic store
+            if action:
+                res = result.get("result") if isinstance(result, dict) else None
+                if isinstance(res, dict) and res.get("proposals") == []:
+                    reason = res.get("message", "judge rejected")
+                    _record_failed_attempt(run_id, action, target_canon, reason, round_idx)
+                    # Update local excluded set so subsequent tool calls in the same round see it.
+                    new_excluded = set(excluded) | {(action, target_canon)}
+                    state_update_excluded: set = new_excluded
+                else:
+                    state_update_excluded = excluded
+            else:
+                state_update_excluded = excluded
 
     # Capture tool result in working memory
     tr = ToolResult(
@@ -371,8 +502,8 @@ def tool_node(state: BrainState) -> dict:
         "pending_tool": None,
     }
 
-    # If propose_* succeeded, extract new proposals + subject lock from ctx
-    if tool_spec is not None:
+    # If we actually invoked a tool (ctx is set), extract proposal_cache and lock updates
+    if tool_spec is not None and ctx is not None:
         new_proposals = {
             pid: proposal for pid, proposal in ctx.proposal_cache.items()
             if pid not in state.get("proposal_cache", {})
@@ -381,6 +512,8 @@ def tool_node(state: BrainState) -> dict:
             update["proposal_cache"] = {"add": new_proposals}
         update["proposed_subject_this_round"] = ctx._proposed_subject_this_round
         update["tool_cache_this_round"] = dict(ctx._tool_cache_this_round)
+        # Propagate excluded set updates (if propose failed, this round's later tool calls should see it)
+        update["excluded_attempts"] = state_update_excluded
 
     return update
 
@@ -419,6 +552,52 @@ def forced_decide_node(state: BrainState) -> dict:
               output_chars=len(str(step.model_dump())), elapsed_s=elapsed_s)
     return {"llm_call_count": 1,
             "pending_decision": apply_reversibility_default(step.decision)}
+
+
+def forced_preview_node(state: BrainState) -> dict:
+    """Tool budget exhausted with NO proposal in cache — force LLM to call one
+    propose_*_preview now so the round can produce an applyable decision.
+
+    This avoids the "predictably fail" pattern where budget runs out, LLM is
+    forced to decide without preview, and gate REVIEWs the decision.
+    """
+    log = get_default_logger()
+    round_idx = state.get("current_round", 0)
+
+    mem = _state_to_memory_view(state)
+    tools_description = _render_tools_for_llm()
+    system_prompt = SYSTEM_PROMPT.format(tools_description=tools_description)
+    forced_msg = (
+        mem.render_for_llm()
+        + "\n\nYou have used your tool budget for this round, BUT you have no "
+          "proposal cached yet — any decide right now would be REVIEW-gated. "
+          "You MUST call exactly ONE propose_*_preview tool for a target you "
+          "want to act on next. Output mode=\"call_tool\" with one of: "
+          "propose_split_preview / propose_refine_preview / propose_deprecate_preview / "
+          "propose_merge_preview."
+    )
+
+    t0 = time.perf_counter()
+    step: BrainStep | None = invoke_with_retry(
+        _llm_model(),
+        [("system", system_prompt), ("user", forced_msg)],
+        retries=3,
+        caller=f"brain.forced_preview.r{round_idx}",
+        logger=log,
+    )
+    elapsed_s = round(time.perf_counter() - t0, 2)
+
+    if step is None or step.mode != "call_tool" or not step.tool_name:
+        log.event("brain.forced_preview_failed", round_idx=round_idx, elapsed_s=elapsed_s)
+        return {"llm_call_count": 1, "pending_tool": None}
+
+    log.event("brain.llm_call", round_idx=round_idx, mode="preview_forced",
+              input_chars=len(system_prompt) + len(forced_msg),
+              output_chars=len(str(step.model_dump())), elapsed_s=elapsed_s)
+    return {
+        "llm_call_count": 1,
+        "pending_tool": (step.tool_name, dict(step.tool_args or {})),
+    }
 
 
 def verify_node(state: BrainState) -> dict:
@@ -491,7 +670,11 @@ def apply_node(state: BrainState) -> dict:
         return {
             "vocab": new_vocab,
             "assignments": new_assignments,
-            "proposal_cache": {"remove": [pid]},
+            # Clear ALL cached proposals — vocab/assignments just changed, any
+            # surviving proposal from an earlier REVIEW would now be stale
+            # (its prune_record_ids may reference records whose tags have
+            # shifted). Force the LLM to re-propose against the fresh state.
+            "proposal_cache": {"replace": {}},
             "applied_count": 1,
             "pending_apply_outcome": f"applied: vocab {len(state['vocab'])}→{len(new_vocab)} tags",
         }
@@ -586,12 +769,28 @@ def route_after_reason(state: BrainState) -> Literal["tool", "verify", "forced_d
     return "forced_decide"
 
 
-def route_after_tool(state: BrainState) -> Literal["reason", "forced_decide"]:
-    if state.get("round_tool_count", 0) >= state.get("max_tools_per_round", 5):
+def route_after_tool(state: BrainState) -> Literal["reason", "forced_preview", "forced_decide"]:
+    max_tools = state.get("max_tools_per_round", 5)
+    used = state.get("round_tool_count", 0)
+    cost_cap = state.get("llm_call_count", 0) >= state.get("cost_cap_calls", 60)
+    # Allow at most ONE extra tool slot for the forced_preview rescue path.
+    over_budget = used > max_tools
+
+    if cost_cap or over_budget:
         return "forced_decide"
-    if state.get("llm_call_count", 0) >= state.get("cost_cap_calls", 60):
+    if used >= max_tools:
+        # Budget exhausted at exactly max: if cache is empty, divert one slot
+        # to forced_preview so the round produces an applyable decision.
+        if not state.get("proposal_cache"):
+            return "forced_preview"
         return "forced_decide"
     return "reason"
+
+
+def route_after_forced_preview(state: BrainState) -> Literal["tool", "forced_decide"]:
+    if state.get("pending_tool") is not None:
+        return "tool"
+    return "forced_decide"
 
 
 def route_after_forced_decide(state: BrainState) -> Literal["verify", "archive"]:
@@ -624,12 +823,16 @@ def route_after_archive(state: BrainState) -> Literal["orient", "end"]:
 # ── Graph construction ────────────────────────────────────────────────────
 
 
-def build_graph(checkpointer=None):
+def build_graph(checkpointer=None, store: BaseStore | None = None):
+    global _episodic_store
+    _episodic_store = store if store is not None else InMemoryStore()
+
     g = StateGraph(BrainState)
 
     g.add_node("orient", orient_node)
     g.add_node("reason", reason_node)
     g.add_node("tool", tool_node)
+    g.add_node("forced_preview", forced_preview_node)
     g.add_node("forced_decide", forced_decide_node)
     g.add_node("verify", verify_node)
     g.add_node("gate", gate_node)
@@ -646,7 +849,12 @@ def build_graph(checkpointer=None):
     g.add_conditional_edges(
         "tool",
         route_after_tool,
-        {"reason": "reason", "forced_decide": "forced_decide"},
+        {"reason": "reason", "forced_preview": "forced_preview", "forced_decide": "forced_decide"},
+    )
+    g.add_conditional_edges(
+        "forced_preview",
+        route_after_forced_preview,
+        {"tool": "tool", "forced_decide": "forced_decide"},
     )
     g.add_conditional_edges(
         "forced_decide",
@@ -711,6 +919,7 @@ def run_brain_graph(
         "history": [],
         "facts": [],
         "decisions": [],
+        "excluded_attempts": set(),
         "llm_call_count": 0,
         "applied_count": 0,
         "stop_reason": "",
@@ -732,4 +941,9 @@ def run_brain_graph(
         "applied_count": final.get("applied_count", 0),
         "stop_reason": final.get("stop_reason") or "max_rounds",
         "total_llm_calls": final.get("llm_call_count", 0),
+        # Full final network state — caller decides whether to persist. Prefixed
+        # with _ so it can be popped before serializing the summary JSON
+        # (which shouldn't carry 696 records).
+        "_final_vocab": list(final.get("vocab", [])),
+        "_final_assignments": list(final.get("assignments", [])),
     }

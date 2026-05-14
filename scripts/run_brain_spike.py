@@ -156,7 +156,7 @@ def main() -> None:
         vocab=vocab,
         assignments=assignments,
         max_rounds=args.max_rounds,
-        max_tools_per_round=5,
+        max_tools_per_round=3,
         cost_cap_calls=60,
         logger=logger,
     )
@@ -164,12 +164,26 @@ def main() -> None:
     elapsed = round(time.perf_counter() - t_start, 1)
     logger.close()
 
-    # Write summary JSON
+    # Persist final vocab + assignments snapshot (post-apply state) so judges
+    # and follow-up spikes can diff before/after or load the new network.
+    final_vocab = result.pop("_final_vocab", [])
+    final_assignments = result.pop("_final_assignments", [])
+    vocab_path = outputs_dir / f"spike_vocab_{ts}.json"
+    with open(vocab_path, "w") as f:
+        json.dump({
+            "timestamp": ts,
+            "source_network": str(network_path),
+            "vocab": final_vocab,
+            "assignments": final_assignments,
+        }, f, indent=2, default=str)
+
+    # Write summary JSON (without the heavy vocab/assignments payload)
     summary = {
         "timestamp": ts,
         "network": str(network_path),
         "max_rounds": args.max_rounds,
         "elapsed_s": elapsed,
+        "final_vocab_snapshot": str(vocab_path),
         **result,
     }
     with open(summary_path, "w") as f:
@@ -177,6 +191,7 @@ def main() -> None:
 
     print(f"\nTrace: {trace_path}")
     print(f"Summary: {summary_path}")
+    print(f"Final vocab: {vocab_path}")
     print()
     print(format_timeline(result))
 

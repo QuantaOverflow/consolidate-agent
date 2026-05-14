@@ -61,6 +61,70 @@ def _lock_subject(ctx: BrainContext, subject: frozenset) -> None:
     ctx._proposed_subject_this_round = subject
 
 
+def _simulate_diff(ctx: BrainContext, proposal, affected_tag_for_size: str | None) -> dict:
+    """Sandbox-apply the proposal on a copy and compute a before/after diff.
+
+    Returns a structured diff containing per-record tag changes (for affected
+    records only) and target-tag size before/after. No mutation of ctx.
+    """
+    from copy import deepcopy
+    from consolidate_agent.vocab_maintenance.apply import apply_proposal
+
+    try:
+        sandbox_vocab = deepcopy(ctx.vocab)
+        sandbox_assignments = deepcopy(ctx.assignments)
+        new_vocab, new_assignments = apply_proposal(
+            sandbox_vocab, sandbox_assignments, proposal
+        )
+    except Exception as e:
+        return {"sandbox_error": str(e)[:200]}
+
+    # Build lookup of new tag sets per record
+    new_by_id = {a["record_id"]: a for a in new_assignments}
+
+    record_diffs: list[dict] = []
+    orphan_count = 0
+    for a in ctx.assignments:
+        if a.get("missing"):
+            continue
+        rid = a["record_id"]
+        before = [t["name"] for t in a.get("selected_tags", [])]
+        new_a = new_by_id.get(rid)
+        after = (
+            [t["name"] for t in new_a.get("selected_tags", [])]
+            if new_a else []
+        )
+        if set(before) != set(after):
+            entry = {
+                "record_id": rid,
+                "before_tags": before,
+                "after_tags": after,
+                "becomes_orphan": len(after) == 0,
+            }
+            record_diffs.append(entry)
+            if len(after) == 0:
+                orphan_count += 1
+
+    target_before = target_after = None
+    if affected_tag_for_size:
+        target_before = sum(
+            1 for a in ctx.assignments
+            if not a.get("missing") and any(t["name"] == affected_tag_for_size for t in a.get("selected_tags", []))
+        )
+        target_after = sum(
+            1 for a in new_assignments
+            if not a.get("missing") and any(t["name"] == affected_tag_for_size for t in a.get("selected_tags", []))
+        )
+
+    return {
+        "target_size_before": target_before,
+        "target_size_after": target_after,
+        "affected_record_count": len(record_diffs),
+        "orphan_count": orphan_count,
+        "record_diffs": record_diffs[:15],   # cap to keep prompt reasonable
+    }
+
+
 # ── impl functions ────────────────────────────────────────────────────────────
 
 
@@ -187,11 +251,13 @@ def _impl_propose_split_preview(args: dict, ctx: BrainContext) -> dict:
             }
             for st in proposal.sub_tags
         ]
+        diff = _simulate_diff(ctx, proposal, tag_name)
         return _ok({
             "tag_name": tag_name,
             "proposal_id": proposal_id,
             "sub_tags": sub_tags_preview,
             "total_records": sum(len(st["record_ids"]) for st in proposal.sub_tags),
+            "diff": diff,
         })
     except Exception as e:
         return _err(f"propose_split_preview({tag_name}) failed: {e}")
@@ -218,12 +284,13 @@ def _impl_propose_refine_preview(args: dict, ctx: BrainContext) -> dict:
         ctx.proposal_cache[proposal_id] = proposal
         _lock_subject(ctx, frozenset({tag_name}))
 
+        diff = _simulate_diff(ctx, proposal, tag_name)
         return _ok({
             "tag_name": tag_name,
             "proposal_id": proposal_id,
             "new_definition": proposal.new_definition,
             "prune_count": len(proposal.prune_record_ids),
-            "prune_record_ids": list(proposal.prune_record_ids)[:10],
+            "diff": diff,
         })
     except Exception as e:
         return _err(f"propose_refine_preview({tag_name}) failed: {e}")
@@ -266,6 +333,7 @@ def _impl_propose_deprecate_preview(args: dict, ctx: BrainContext) -> dict:
                 orphan_count += 1
 
         if isinstance(proposal, MergeProposal):
+            diff = _simulate_diff(ctx, proposal, proposal.discard_tag)
             return _ok({
                 "tag_name": tag_name,
                 "proposal_id": proposal_id,
@@ -274,7 +342,9 @@ def _impl_propose_deprecate_preview(args: dict, ctx: BrainContext) -> dict:
                 "discard_tag": proposal.discard_tag,
                 "affected_record_count": len(affected_records),
                 "note": "judge recommended merge_to instead of deprecate",
+                "diff": diff,
             })
+        diff = _simulate_diff(ctx, proposal, tag_name)
         return _ok({
             "tag_name": tag_name,
             "proposal_id": proposal_id,
@@ -282,6 +352,7 @@ def _impl_propose_deprecate_preview(args: dict, ctx: BrainContext) -> dict:
             "affected_record_count": len(affected_records),
             "orphan_count": orphan_count,
             "note": f"{orphan_count} records would lose their only matter tag if deprecated",
+            "diff": diff,
         })
     except Exception as e:
         return _err(f"propose_deprecate_preview({tag_name}) failed: {e}")
@@ -318,6 +389,7 @@ def _impl_propose_merge_preview(args: dict, ctx: BrainContext) -> dict:
             a["record_id"] for a in ctx.assignments
             if not a.get("missing") and any(t["name"] == discard for t in a.get("selected_tags", []))
         ]
+        diff = _simulate_diff(ctx, proposal, discard)
         return _ok({
             "tag_a": tag_a,
             "tag_b": tag_b,
@@ -325,6 +397,7 @@ def _impl_propose_merge_preview(args: dict, ctx: BrainContext) -> dict:
             "keep_tag": keep,
             "discard_tag": discard,
             "affected_record_count": len(affected),
+            "diff": diff,
         })
     except Exception as e:
         return _err(f"propose_merge_preview({tag_a}, {tag_b}) failed: {e}")

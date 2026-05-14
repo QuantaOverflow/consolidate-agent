@@ -37,8 +37,6 @@ class AgentDecision(BaseModel):
     affected_records_estimate: int = 0
     reversibility: Literal["clean_rollback", "messy_rollback", "irreversible"] = "clean_rollback"
 
-    expected_outcome: str = Field(default="", description="qualitative description of what you expect to change semantically, e.g. 'http_api should split into 3 cleaner sub-concepts: auth, streaming, routing'")
-
     stop_reason: str = ""
 
 
@@ -69,44 +67,43 @@ class GateDecision:
 
 
 def gate_decision(d: AgentDecision, memory: "AgentMemory") -> GateDecision:
+    """Admission control on state mutations.
+
+    Only fact-based gates remain. Removed in this version: low_certainty,
+    insufficient_evidence, irreversible_always_review — all depended on
+    LLM-self-reported fields that spike data showed LLM does not honestly
+    calibrate (cert always "high", observations padded). high_cert_no_preview
+    and high_impact_no_preview are kept as diagnostic markers (they co-trigger
+    with decide_without_proposal after verify_node fact-overrides preview_reviewed).
+    """
     triggered: list[str] = []
 
     if d.action == "stop":
         return GateDecision(GateResult.AUTO, ["stop_always_auto"], "stop allowed")
 
-    if d.reversibility == "irreversible":
-        triggered.append("irreversible_always_review")
-        return GateDecision(GateResult.REVIEW, triggered, "action marked irreversible")
-
-    if d.certainty == "low":
-        triggered.append("low_certainty")
-
-    if len(d.supporting_observations) < 2:
-        triggered.append("insufficient_evidence")
-
-    # 5. High impact + no preview (replaces former no_golden check per ADR-0007)
+    # Diagnostic markers (subset of decide_without_proposal after verify_node)
     if d.affected_records_estimate > _HIGH_IMPACT_THRESHOLD and not d.preview_reviewed:
         triggered.append("high_impact_no_preview")
-
     if d.certainty == "high" and not d.preview_reviewed and d.action in {
         "split", "merge", "refine", "deprecate"
     }:
         triggered.append("high_cert_no_preview")
 
-    # Silent no-op guard: any modifying action without a preview means no
-    # proposal is in cache to apply. Brain.py's verify step would have set
-    # preview_reviewed=True if a proposal existed — so reaching here with
-    # preview_reviewed=False means we'd produce a "gate=AUTO but no proposal
-    # in cache" silent no-op. Block it.
+    # Core gate: modify action must have a cached proposal (verify_node would
+    # have set preview_reviewed=True if cache had a match). Reaching here with
+    # preview_reviewed=False means there's nothing to apply — block to prevent
+    # silent no-op.
     if d.action in {"split", "merge", "refine", "deprecate"} and not d.preview_reviewed:
         if "decide_without_proposal" not in triggered:
             triggered.append("decide_without_proposal")
 
     if d.action not in {"inspect_more", "stop"} and d.target:
+        # Only count COMMITTED modifications — REVIEW-gated attempts don't count
+        # as "flip-flop" since they never changed the network.
         recent_targets = [
             r.target
             for r in list(memory.history)[-5:]
-            if r.target and r.decision_action not in (None, "inspect_more")
+            if r.target and r.committed
         ]
         same_target_count = sum(1 for t in recent_targets if t == d.target)
         if same_target_count >= 2:
