@@ -23,6 +23,7 @@ from .similarity import find_similar_pairs
 
 # Priority bands. Lower = higher priority. Within a band: severity ascending.
 # Bands are spaced by 1000 so per-item severity (0-999) cannot bleed across.
+_PRI_SPLIT_BASE = 500      # split before refine — coarse tag must be split first
 _PRI_REFINE_BASE = 1000
 _PRI_MERGE_BASE = 2000
 _PRI_DEPRECATE_BASE = 3000
@@ -34,7 +35,7 @@ DEFAULT_SIMILAR_PAIRS_THRESHOLD = 0.80
 @dataclass(frozen=True)
 class WorkItem:
     """One surfaced issue + the action that addresses it."""
-    action: str             # "propose_refine" | "propose_merge" | "propose_deprecate"
+    action: str             # "propose_refine" | "propose_merge" | "propose_deprecate" | "propose_split"
     focus: str              # tag name (single tag for refine/deprecate, "a + b" for merge)
     reason: str             # 1-line justification recorded in audit log
     priority: int           # lower = higher priority
@@ -106,6 +107,21 @@ def build_work_queue(
                 focus=tag_name,
                 reason="zero usage in sample",
                 priority=_PRI_DEPRECATE_BASE,
+            ))
+
+    if "propose_split" not in disabled:
+        from .probes import compute_heterogeneous_tags
+        het_tags = compute_heterogeneous_tags(
+            vocab, assignments, db_path,
+            coherence_threshold=0.42,
+            min_records=15,
+        )
+        for ht in het_tags[:3]:  # top 3 most heterogeneous
+            queue.append(WorkItem(
+                action="propose_split",
+                focus=ht["tag"],
+                reason=f"low intra-cluster coherence {ht['coherence']:.2f} ({ht['record_count']} records)",
+                priority=_PRI_SPLIT_BASE + int((1 - ht["coherence"]) * 1000),
             ))
 
     queue.sort(key=lambda w: (w.priority, w.action, w.focus))

@@ -38,6 +38,13 @@ class DeprecateProposal:
 
 
 @dataclass(frozen=True)
+class SplitTagProposal:
+    tag: str                        # tag to be split
+    sub_tags: tuple[dict, ...]      # each: {name, definition, record_ids: tuple[str, ...]}
+    type: str = "split"
+
+
+@dataclass(frozen=True)
 class RefineTagProposal:
     """Update a tag's definition AND detach a small set of records that don't fit.
 
@@ -213,10 +220,115 @@ def _apply_refine(
     return new_vocab, new_assignments
 
 
+def _apply_split(
+    vocab: list[dict], assignments: list[dict], p: SplitTagProposal
+) -> tuple[list[dict], list[dict]]:
+    """Split one tag into 2+ sub-tags, reassigning all records.
+
+    Invariants:
+      I-S1: p.tag exists in vocab
+      I-S2: at least 2 sub-tags
+      I-S3: sub-tag names don't collide with existing vocab or each other
+      I-S4: all assigned records of p.tag appear in exactly one sub-tag
+      I-S5: sub-tag record_ids are a subset of p.tag's assigned records
+      I-S6: each sub-tag has >= 2 records
+      I-S7: no record_id appears in two sub-tags
+    """
+    names = {t["name"] for t in vocab}
+    if p.tag not in names:
+        raise InvalidProposal(f"split target '{p.tag}' not in vocab")
+    if len(p.sub_tags) < 2:
+        raise InvalidProposal(f"split requires >= 2 sub-tags, got {len(p.sub_tags)}")
+
+    sub_names = [st["name"] for st in p.sub_tags]
+    # I-S3a: no internal duplicate
+    if len(sub_names) != len(set(sub_names)):
+        raise InvalidProposal(f"split sub-tag names have duplicates: {sub_names}")
+    # I-S3b: no collision with existing vocab (excluding the tag being split)
+    other_vocab = names - {p.tag}
+    for sn in sub_names:
+        if sn in other_vocab:
+            raise InvalidProposal(f"split sub-tag '{sn}' already exists in vocab")
+
+    # gather current record_ids assigned to p.tag
+    original_record_ids: set[str] = set()
+    for a in assignments:
+        if a.get("missing"):
+            continue
+        if any(t["name"] == p.tag for t in a.get("selected_tags", [])):
+            original_record_ids.add(a["record_id"])
+
+    # build mapping: record_id -> sub-tag name
+    record_to_sub: dict[str, str] = {}
+    for st in p.sub_tags:
+        for rid in st["record_ids"]:
+            # I-S7: no double assignment
+            if rid in record_to_sub:
+                raise InvalidProposal(
+                    f"record '{rid}' appears in multiple sub-tags ('{record_to_sub[rid]}' and '{st['name']}')"
+                )
+            record_to_sub[rid] = st["name"]
+
+    # I-S5: all assigned record_ids must be from original tag
+    foreign = set(record_to_sub) - original_record_ids
+    if foreign:
+        raise InvalidProposal(
+            f"split sub-tags reference {len(foreign)} record(s) not assigned to '{p.tag}': {sorted(foreign)[:5]}"
+        )
+
+    # I-S4: all original records must be covered
+    uncovered = original_record_ids - set(record_to_sub)
+    if uncovered:
+        raise OrphanError(
+            f"split of '{p.tag}' would leave {len(uncovered)} record(s) uncovered: {sorted(uncovered)[:5]}",
+            orphan_record_ids=sorted(uncovered),
+        )
+
+    # I-S6: each sub-tag must have >= 2 records
+    for st in p.sub_tags:
+        if len(st["record_ids"]) < 2:
+            raise InvalidProposal(
+                f"sub-tag '{st['name']}' has only {len(st['record_ids'])} record(s); minimum is 2"
+            )
+
+    # Apply: add sub-tags, remove original tag from vocab
+    new_vocab = [t for t in vocab if t["name"] != p.tag]
+    for st in p.sub_tags:
+        new_vocab.append({"name": st["name"], "definition": st["definition"]})
+
+    # Update assignments: replace p.tag with the sub-tag for each record
+    new_assignments = []
+    for a in assignments:
+        if a.get("missing"):
+            new_assignments.append(a)
+            continue
+        rid = a["record_id"]
+        sub_name = record_to_sub.get(rid)
+        if sub_name is None:
+            # record wasn't under p.tag — just remove p.tag if present (shouldn't be)
+            filtered = [t for t in a["selected_tags"] if t["name"] != p.tag]
+            new_assignments.append(dict(a, selected_tags=filtered))
+        else:
+            # replace p.tag entry with the sub-tag, preserving confidence
+            new_tags = []
+            replaced = False
+            for t in a["selected_tags"]:
+                if t["name"] == p.tag:
+                    new_tags.append({"name": sub_name, "confidence": t["confidence"]})
+                    replaced = True
+                else:
+                    new_tags.append(t)
+            if not replaced:
+                new_tags.append({"name": sub_name, "confidence": "high"})
+            new_assignments.append(dict(a, selected_tags=new_tags))
+
+    return new_vocab, new_assignments
+
+
 def apply_proposal(
     vocab: list[dict],
     assignments: list[dict],
-    proposal: NewTagProposal | MergeProposal | DeprecateProposal | RefineTagProposal,
+    proposal: NewTagProposal | MergeProposal | DeprecateProposal | RefineTagProposal | SplitTagProposal,
 ) -> tuple[list[dict], list[dict]]:
     """Apply proposal, returning new (vocab, assignments).
 
@@ -235,6 +347,8 @@ def apply_proposal(
         return _apply_deprecate(vocab, assignments, proposal)
     if isinstance(proposal, RefineTagProposal):
         return _apply_refine(vocab, assignments, proposal)
+    if isinstance(proposal, SplitTagProposal):
+        return _apply_split(vocab, assignments, proposal)
     raise InvalidProposal(f"unknown proposal type: {type(proposal).__name__}")
 
 

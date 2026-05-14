@@ -345,6 +345,101 @@ def compare_tag_records(
     }
 
 
+def compute_heterogeneous_tags(
+    vocab: list[dict],
+    assignments: list[dict],
+    db_path: Path,
+    *,
+    coherence_threshold: float = 0.42,
+    min_records: int = 15,
+    max_records: int = 300,
+) -> list[dict]:
+    """Return Matter tags with low intra-cluster coherence (split candidates).
+
+    For each eligible tag, computes mean pairwise cosine of its assigned
+    records' embeddings. Tags below `coherence_threshold` are candidates for
+    splitting.
+
+    Returns list[{tag, coherence, record_count}] sorted by coherence ascending.
+    Skips tags with < min_records assigned records.
+    Uses stored embeddings from source_knowledge_records — no LLM calls.
+    """
+    import json as _json
+
+    from .similarity import cosine
+
+    if not vocab or not assignments:
+        return []
+
+    # group record_ids by tag
+    tag_record_ids: dict[str, list[str]] = {t["name"]: [] for t in vocab}
+    for a in assignments:
+        if a.get("missing"):
+            continue
+        for t in a.get("selected_tags", []):
+            if t["name"] in tag_record_ids:
+                tag_record_ids[t["name"]].append(a["record_id"])
+
+    # collect all record_ids that belong to an eligible tag
+    eligible_tags = [
+        name for name, rids in tag_record_ids.items()
+        if min_records <= len(rids)
+    ]
+    if not eligible_tags:
+        return []
+
+    needed_ids: set[str] = set()
+    for name in eligible_tags:
+        needed_ids.update(tag_record_ids[name][:max_records])
+
+    # load stored embeddings from db
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    placeholders = ",".join("?" * len(needed_ids))
+    rows = conn.execute(
+        f"SELECT record_id, embedding FROM source_knowledge_records WHERE record_id IN ({placeholders})",
+        list(needed_ids),
+    ).fetchall()
+    conn.close()
+
+    emb_by_id: dict[str, tuple[float, ...]] = {}
+    for row in rows:
+        raw = row["embedding"]
+        if raw is None:
+            continue
+        if isinstance(raw, (bytes, str)):
+            vec = _json.loads(raw)
+        else:
+            vec = raw
+        emb_by_id[row["record_id"]] = tuple(vec)
+
+    results: list[dict] = []
+    for name in eligible_tags:
+        rids = tag_record_ids[name][:max_records]
+        vecs = [emb_by_id[rid] for rid in rids if rid in emb_by_id]
+        if len(vecs) < min_records:
+            continue
+
+        # mean pairwise cosine — O(n²) over at most max_records vectors
+        total = 0.0
+        count = 0
+        for i in range(len(vecs)):
+            for j in range(i + 1, len(vecs)):
+                total += cosine(vecs[i], vecs[j])
+                count += 1
+        mean_coherence = total / count if count else 0.0
+
+        if mean_coherence < coherence_threshold:
+            results.append({
+                "tag": name,
+                "coherence": round(mean_coherence, 4),
+                "record_count": len(vecs),
+            })
+
+    results.sort(key=lambda x: x["coherence"])
+    return results
+
+
 # ── Dispatch table ───────────────────────────────────────────────────────────
 
 
