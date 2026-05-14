@@ -84,6 +84,7 @@ class NetworkState:
     recent_operations: dict[str, list[str]]
     total_records: int
     total_edges: int
+    triage_report: Any = None  # TriageReport | None — typed Any to avoid import cycle
 
     def render(self) -> str:
         lines = [
@@ -262,6 +263,9 @@ class AgentMemory:
         if critical:
             sections.append(critical)
 
+        if self.state.triage_report is not None:
+            sections.append(self.state.triage_report.render())
+
         sections.append("=== Current network state ===\n" + self.state.render())
 
         if self.facts:
@@ -292,7 +296,8 @@ class AgentMemory:
         facts_sec = next(s for s in sections if s.startswith("=== Run facts ==="))
         working_sec = next(s for s in sections if s.startswith("=== This round so far ==="))
         critical_secs = [s for s in sections if s.startswith("⚠⚠⚠ CRITICAL")]
-        prefix_parts = critical_secs + [state_sec, facts_sec, "(history truncated)", working_sec]
+        triage_secs = [s for s in sections if s.startswith("=== Network triage ===")]
+        prefix_parts = critical_secs + triage_secs + [state_sec, facts_sec, "(history truncated)", working_sec]
         base = "\n\n".join(prefix_parts)
         budget = _RENDER_MAX_CHARS - len(base) - 4  # 4 for "\n\n"
 
@@ -305,7 +310,7 @@ class AgentMemory:
                     break
                 added = line + added
             truncated_history += added.rstrip() or "(truncated)"
-            result = "\n\n".join(critical_secs + [state_sec, facts_sec, truncated_history, working_sec])
+            result = "\n\n".join(critical_secs + triage_secs + [state_sec, facts_sec, truncated_history, working_sec])
         else:
             result = base
 

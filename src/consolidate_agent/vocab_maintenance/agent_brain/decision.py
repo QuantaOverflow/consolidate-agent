@@ -21,12 +21,6 @@ REVERSIBILITY_DEFAULTS: dict[str, str] = {
 }
 
 
-class ExpectedDelta(BaseModel):
-    metric: str
-    direction: Literal["increase", "decrease", "no_change"]
-    magnitude: Literal["small", "medium", "large"]
-
-
 class AgentDecision(BaseModel):
     action: Literal["split", "merge", "refine", "deprecate", "inspect_more", "stop"]
     target: str = ""
@@ -38,13 +32,12 @@ class AgentDecision(BaseModel):
     supporting_observations: list[str] = Field(min_length=1, max_length=8)
     opposing_observations: list[str] = Field(default_factory=list, max_length=8)
 
-    ground_truth_sampled: bool = False
     preview_reviewed: bool = False
 
     affected_records_estimate: int = 0
     reversibility: Literal["clean_rollback", "messy_rollback", "irreversible"] = "clean_rollback"
 
-    expected_metric_deltas: list[ExpectedDelta] = Field(default_factory=list, max_length=5)
+    expected_outcome: str = Field(default="", description="qualitative description of what you expect to change semantically, e.g. 'http_api should split into 3 cleaner sub-concepts: auth, streaming, routing'")
 
     stop_reason: str = ""
 
@@ -91,13 +84,23 @@ def gate_decision(d: AgentDecision, memory: "AgentMemory") -> GateDecision:
     if len(d.supporting_observations) < 2:
         triggered.append("insufficient_evidence")
 
-    if d.affected_records_estimate > _HIGH_IMPACT_THRESHOLD and not d.ground_truth_sampled:
-        triggered.append("high_impact_no_golden_check")
+    # 5. High impact + no preview (replaces former no_golden check per ADR-0007)
+    if d.affected_records_estimate > _HIGH_IMPACT_THRESHOLD and not d.preview_reviewed:
+        triggered.append("high_impact_no_preview")
 
     if d.certainty == "high" and not d.preview_reviewed and d.action in {
         "split", "merge", "refine", "deprecate"
     }:
         triggered.append("high_cert_no_preview")
+
+    # Silent no-op guard: any modifying action without a preview means no
+    # proposal is in cache to apply. Brain.py's verify step would have set
+    # preview_reviewed=True if a proposal existed — so reaching here with
+    # preview_reviewed=False means we'd produce a "gate=AUTO but no proposal
+    # in cache" silent no-op. Block it.
+    if d.action in {"split", "merge", "refine", "deprecate"} and not d.preview_reviewed:
+        if "decide_without_proposal" not in triggered:
+            triggered.append("decide_without_proposal")
 
     if d.action not in {"inspect_more", "stop"} and d.target:
         recent_targets = [

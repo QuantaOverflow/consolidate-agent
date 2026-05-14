@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
 from .decision import AgentDecision, GateDecision
 
@@ -13,9 +12,6 @@ class DecisionOutcome:
     decision_id: str
     decision: dict
     gate_result: dict
-
-    metric_deltas: dict[str, float] | None = None
-    predicted_deltas_match: dict[str, str] | None = None
 
     was_beneficial: bool | None = None
     rolled_back: bool = False
@@ -54,7 +50,6 @@ class OutcomeLog:
         *,
         action: str | None = None,
         certainty: str | None = None,
-        ground_truth_sampled: bool | None = None,
         only_committed: bool = False,
     ) -> list[DecisionOutcome]:
         results = self.load_all()
@@ -63,8 +58,6 @@ class OutcomeLog:
             if action is not None and o.decision.get("action") != action:
                 continue
             if certainty is not None and o.decision.get("certainty") != certainty:
-                continue
-            if ground_truth_sampled is not None and o.decision.get("ground_truth_sampled") != ground_truth_sampled:
                 continue
             if only_committed and o.rolled_back:
                 continue

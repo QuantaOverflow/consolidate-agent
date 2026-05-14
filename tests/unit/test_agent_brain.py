@@ -70,7 +70,6 @@ def _make_clean_decision(action: str = "refine", target: str = "my_tag") -> Agen
         certainty="medium",
         supporting_observations=["obs1", "obs2"],
         opposing_observations=[],
-        ground_truth_sampled=True,
         preview_reviewed=True,
         affected_records_estimate=5,
         reversibility="clean_rollback",
@@ -241,13 +240,13 @@ def test_insufficient_evidence_review():
     assert "insufficient_evidence" in gd.triggered_gates
 
 
-def test_high_impact_no_golden_review():
+def test_high_impact_no_preview_review():
     mem = _make_memory()
     d = _make_clean_decision()
-    d = d.model_copy(update={"affected_records_estimate": 50, "ground_truth_sampled": False})
+    d = d.model_copy(update={"affected_records_estimate": 50, "preview_reviewed": False})
     gd = gate_decision(d, mem)
     assert gd.result == GateResult.REVIEW
-    assert "high_impact_no_golden_check" in gd.triggered_gates
+    assert "high_impact_no_preview" in gd.triggered_gates
 
 
 def test_high_cert_no_preview_review():
@@ -324,7 +323,7 @@ def test_apply_reversibility_default_respects_explicit_override():
 def _make_outcome(decision_id: str, action: str = "refine", certainty: str = "medium") -> DecisionOutcome:
     return DecisionOutcome(
         decision_id=decision_id,
-        decision={"action": action, "certainty": certainty, "ground_truth_sampled": True},
+        decision={"action": action, "certainty": certainty},
         gate_result={"result": "auto", "triggered_gates": ["all_gates_pass"], "reason": "ok"},
         timestamp="2026-01-01T00:00:00+00:00",
     )

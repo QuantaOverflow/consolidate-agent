@@ -29,6 +29,7 @@ from .decision import (
 )
 from .memory import AgentMemory, NetworkState, RoundSummary
 from .tools import TOOLS, TOOLS_BY_NAME, BrainContext, call_tool_with_cache
+from .triage import compute_triage
 
 
 def render_tools_for_llm() -> str:
@@ -65,7 +66,7 @@ class BrainStep(BaseModel):
 SYSTEM_PROMPT = """You are a vocabulary maintenance agent. You manage a controlled vocabulary
 of tags applied to ~700 engineering knowledge records.
 
-YOUR GOAL: improve the network's quality (coherence, golden-set match, low hallucination)
+YOUR GOAL: improve the network's quality (coherence, low hallucination)
 through targeted modifications: split, refine, merge, deprecate.
 
 YOU HAVE TOOLS to explore and act. On each step, you decide:
@@ -73,41 +74,70 @@ YOU HAVE TOOLS to explore and act. On each step, you decide:
 - (mode="decide"): output an AgentDecision (action + reasoning + certainty + evidence)
 
 OPERATING PRINCIPLES:
-1. Start by calling assess_global_health to orient yourself.
-2. Investigate the worst-coherence tags first.
-3. Before deciding to modify a tag, inspect it AND check golden samples for that tag.
-4. For high-impact actions (>30 records affected), ALWAYS quick_golden_sample first.
+1. A `=== Network triage ===` section at the top of context lists action candidates
+   already prioritized by deterministic signals (coherence, size, neighbor overlap,
+   confidence ratio). USE IT as your starting worklist — pick the top candidate
+   whose suggested_action you can verify, do not re-discover candidates from scratch.
+2. The triage's `suggested_action` is a starting hypothesis, not a verdict. Always
+   call `inspect_tag` (and `propose_*_preview` if applicable) to verify samples
+   match the hypothesis before deciding. You CAN override the suggestion when
+   samples reveal a different pattern (e.g., triage says "refine" but samples
+   show two distinct clusters → propose split instead).
+3. Skip candidates flagged `recently_modified` unless evidence is decisively new.
+4. For high-impact actions (>30 records affected), ALWAYS call propose_*_preview first.
 5. Preview proposals (propose_*_preview) BEFORE apply.
-6. Output action="stop" when remaining issues have certainty=low OR investigation cost exceeds benefit.
+6. ONE PROPOSAL PER ROUND. Once a `propose_*_preview` call SUCCEEDS (returns a
+   proposal_id), that subject is LOCKED for the round — you MUST decide on it
+   (split/refine/deprecate/merge) this round; previewing any other subject will
+   be REJECTED. A FAILED preview (returns `proposals=[]` or `"no ... proposed"`)
+   does NOT lock — you may try a different action or pick a different target.
+   Do not batch-preview multiple candidates "to compare" — finish the
+   inspect→propose→decide loop for one target per round.
+7. If a `propose_*_preview` returns `proposals=[]` or `message: "no ... proposed"`,
+   the judge has REJECTED this action for this tag. Do NOT call the same preview again —
+   either pick a different action (e.g., merge instead of deprecate), or end with
+   action="inspect_more" / "stop" and move to the next triage candidate next round.
+8. Output action="stop" when remaining triage candidates are all `suggestion_confidence=low`
+   OR you've already addressed all high/medium-confidence candidates.
 
 If you see CRITICAL PATTERNS at the top of context, follow their guidance EXACTLY.
 Repeating a blocked action will fail again — try the suggested alternative.
 
-WORKED EXAMPLE — preview-before-decide pattern:
+WORKED EXAMPLE 1 — follow triage suggestion:
 
-Round X:
-  step 1: assess_global_health() → found http_api coherence=0.35 (low)
-  step 2: inspect_tag(http_api) → 78 records, samples show varied subtopics
-  step 3: quick_golden_sample(filter_tag=http_api) → 60% exact match (mediocre)
-  step 4: propose_refine_preview(http_api) → returns new_definition + prune_count
-  step 5: decide:
-    action="refine", target="http_api", certainty="high",
-    preview_reviewed=True, ground_truth_sampled=True,
-    supporting_observations=[
-      "inspect_tag(http_api).coherence=0.35 < threshold 0.42",
-      "quick_golden_sample(http_api).matter_exact=60%",
-      "propose_refine_preview(http_api): new_definition tightens boundary, prune_count=8"
-    ]
-  → gate: AUTO (passed all checks)
+Round X (triage suggests refine for http_api, confidence=medium):
+  step 1: inspect_tag(http_api) → samples cluster around HTTP semantics, with
+          ~8 stragglers about MySQL auth
+  step 2: propose_refine_preview(http_api) → new_definition tightens scope, prune_count=8
+  step 3: decide(action="refine", target="http_api", certainty="high",
+                 preview_reviewed=True,
+                 supporting_observations=["triage.signals=[low_coh,high_overlap]",
+                                          "inspect_tag samples: ~8 off-topic stragglers",
+                                          "propose_refine_preview.prune_count=8"])
+  → gate AUTO
 
-NOTE: if you skip step 4 (preview), gate will BLOCK your decision because
-"high certainty without preview review" indicates unsupported confidence.
-Call propose_refine_preview or propose_split_preview BEFORE deciding with certainty=high.
+WORKED EXAMPLE 2 — override triage suggestion:
+
+Round X (triage suggests refine for filesystem_path, confidence=medium):
+  step 1: inspect_tag(filesystem_path) → 12 samples reveal TWO distinct clusters:
+          one about path manipulation, another about directory-as-architecture
+  step 2: propose_split_preview(filesystem_path) → split axis: "path_manipulation"
+          vs "project_structure_inference", new tags well-balanced
+  step 3: decide(action="split", target="filesystem_path", certainty="high",
+                 preview_reviewed=True,
+                 supporting_observations=["triage suggested refine, but samples reveal",
+                                          "two distinct semantic clusters",
+                                          "propose_split_preview shows balanced split"],
+                 opposing_observations=["triage's high_overlap signal alone hinted at refine"])
+  → gate AUTO; triage suggestion overridden with evidence.
+
+NOTE: if you skip the propose_*_preview step, gate will BLOCK on
+"high certainty without preview review". Always preview before high-certainty action.
 
 CERTAINTY CALIBRATION TABLE:
-  high: preview_reviewed=True AND ground_truth_sampled=True AND >=3 supporting observations
-  medium: at least one of preview/golden checked, OR 2 supporting observations
-  low: insufficient evidence (1 obs, no preview, no golden) — typically a sign you need inspect_more
+  high: preview_reviewed=True AND >=3 supporting observations from tool outputs
+  medium: preview_reviewed=True OR 2 supporting observations
+  low: insufficient evidence (1 obs, no preview) — typically a sign you need inspect_more
 
 TOOL LIST:
 {tools_description}
@@ -119,14 +149,18 @@ DECISION SCHEMA (use when mode="decide"):
 - certainty: high / medium / low — be honest about uncertainty
 - supporting_observations: cite specific tool outputs (e.g., "inspect_tag(http_api).coherence=0.39")
 - opposing_observations: any reasons this might not work
-- ground_truth_sampled: True only if you called quick_golden_sample
 - preview_reviewed: True only if you called propose_*_preview
 - affected_records_estimate: how many records you expect to change
 - reversibility: leave default (auto-filled) unless special case
-- expected_metric_deltas: list of {{metric, direction, magnitude}}
+- expected_outcome: qualitative semantic prediction (e.g., "http_api should split into 3 cleaner sub-concepts: auth, streaming, routing")
 
 OUTPUT ONE BrainStep PER TURN. Set mode to either "call_tool" or "decide".
-Memory will be shown to you so you remember past tool calls."""
+Memory will be shown to you so you remember past tool calls.
+
+NOTE ON EVIDENCE: You have probing tools that show real network data
+(record content, tag definitions, embeddings). You do NOT have access to
+ground truth labels. Your decisions must be based on the data you can
+inspect, not on optimization against any held-out evaluation set."""
 
 
 def _build_initial_state(context: BrainContext) -> NetworkState:
@@ -137,6 +171,11 @@ def _build_initial_state(context: BrainContext) -> NetworkState:
         for t in a.get("selected_tags", []):
             tag_sizes[t["name"]] = tag_sizes.get(t["name"], 0) + 1
 
+    try:
+        triage_report = compute_triage(context.vocab, context.assignments, context.db_path)
+    except Exception:
+        triage_report = None
+
     return NetworkState(
         tag_sizes=tag_sizes,
         recent_operations={},
@@ -146,6 +185,7 @@ def _build_initial_state(context: BrainContext) -> NetworkState:
             for a in context.assignments
             if not a.get("missing")
         ),
+        triage_report=triage_report,
     )
 
 
@@ -226,6 +266,7 @@ def run_brain_loop(
                     log.event("brain.llm_failed", round_idx=round_idx, reason="decide mode but decision=None")
                     break
                 decision = apply_reversibility_default(step.decision)
+                decision = _verify_decision_against_cache(decision, context)
                 gate = gate_decision(decision, memory)
                 log.event(
                     "brain.decision",
@@ -298,6 +339,7 @@ def run_brain_loop(
             elapsed_s = round(time.perf_counter() - t0, 2)
             if forced_step is not None and forced_step.mode == "decide" and forced_step.decision is not None:
                 decision = apply_reversibility_default(forced_step.decision)
+                decision = _verify_decision_against_cache(decision, context)
                 gate = gate_decision(decision, memory)
                 log.event(
                     "brain.llm_call",
@@ -408,7 +450,22 @@ def run_brain_loop(
             rolled_back=False,
         )
         context._tool_cache_this_round.clear()
+        context._proposed_subject_this_round = frozenset()
         memory.archive_round(round_summary, applied_changes=applied_changes)
+
+        # Recompute triage with updated recently_modified set, so next round
+        # sees fresh signals and cooldown flags on tags we just touched.
+        try:
+            modified_tags = {
+                r.target for r in memory.history
+                if r.committed and r.target
+            }
+            memory.state.triage_report = compute_triage(
+                context.vocab, context.assignments, context.db_path,
+                recently_modified=modified_tags,
+            )
+        except Exception as e:
+            log.event("brain.triage_recompute_failed", round_idx=round_idx, error=str(e)[:200])
 
         log.event(
             "brain.round_end",
@@ -441,20 +498,67 @@ def run_brain_loop(
     }
 
 
+def _compute_real_affected(proposal, context: BrainContext) -> int:
+    """Compute true affected_records from proposal data (overrides LLM's estimate)."""
+    ptype = getattr(proposal, "type", "")
+    if ptype == "split":
+        return sum(len(st.get("record_ids", [])) for st in getattr(proposal, "sub_tags", []))
+    if ptype == "refine":
+        return len(getattr(proposal, "prune_record_ids", []))
+    if ptype == "deprecate":
+        tag = getattr(proposal, "tag", "")
+        return sum(
+            1 for a in context.assignments
+            if not a.get("missing") and any(t["name"] == tag for t in a.get("selected_tags", []))
+        )
+    if ptype == "merge":
+        tag = getattr(proposal, "discard_tag", "")
+        return sum(
+            1 for a in context.assignments
+            if not a.get("missing") and any(t["name"] == tag for t in a.get("selected_tags", []))
+        )
+    return 0
+
+
+def _verify_decision_against_cache(decision: AgentDecision, context: BrainContext) -> AgentDecision:
+    """Override LLM self-reported preview_reviewed and affected_records_estimate
+    with facts from proposal_cache. Closes the bug where LLM previews a tag,
+    receives a proposal_id, then reports preview_reviewed=False in the decide
+    schema and gets blocked by gate.
+    """
+    if decision.action not in {"split", "refine", "merge", "deprecate"}:
+        return decision
+    pid = _find_proposal_for_target(context, decision.target, decision.action)
+    if pid is None:
+        return decision
+    proposal = context.proposal_cache.get(pid)
+    if proposal is None:
+        return decision
+    real_affected = _compute_real_affected(proposal, context)
+    return decision.model_copy(update={
+        "preview_reviewed": True,
+        "affected_records_estimate": real_affected,
+    })
+
+
 def _find_proposal_for_target(context: BrainContext, target: str, action: str) -> str | None:
-    """Return a proposal_id from cache whose tag matches target and type matches action."""
+    """Return a proposal_id from cache whose tag matches target and type matches action.
+
+    No fallback: if no exact (target, action) match exists, return None. The
+    decision will then be blocked by the decide_without_proposal gate rather
+    than apply some stale proposal from a different tag.
+    """
     action_type_map = {"split": "split", "refine": "refine", "merge": "merge", "deprecate": "deprecate"}
     expected_type = action_type_map.get(action)
+    if not expected_type:
+        return None
     for pid, proposal in list(context.proposal_cache.items()):
         ptype = getattr(proposal, "type", "")
         ptag = getattr(proposal, "tag", "") or getattr(proposal, "keep_tag", "")
-        if expected_type and ptype != expected_type:
+        if ptype != expected_type:
             continue
         if ptag == target:
             return pid
-    # If no exact match, return first available (fallback)
-    if context.proposal_cache:
-        return next(iter(context.proposal_cache))
     return None
 
 

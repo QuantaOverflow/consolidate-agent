@@ -8,7 +8,6 @@ Each tool:
 from __future__ import annotations
 
 import json
-import random
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +22,10 @@ class BrainContext:
     golden: list[dict]
     proposal_cache: dict[str, Any] = field(default_factory=dict)
     _tool_cache_this_round: dict = field(default_factory=dict)
+    # tracks which subject (set of tag names) was previewed this round —
+    # enforces "one proposal per round" so the LLM completes inspect→propose→decide
+    # for one target before opening another preview.
+    _proposed_subject_this_round: frozenset = field(default_factory=frozenset)
 
 
 def _ok(result: dict) -> dict:
@@ -31,6 +34,31 @@ def _ok(result: dict) -> dict:
 
 def _err(msg: str) -> dict:
     return {"ok": False, "result": None, "error": msg}
+
+
+def _check_subject(ctx: BrainContext, subject: frozenset) -> dict | None:
+    """Block previewing a NEW subject if a previous preview already produced a
+    valid proposal this round.
+
+    Subject is locked only when a preview returned a real proposal (caller does
+    that via _lock_subject). A failed preview (judge said 'no') does NOT lock,
+    so the LLM is free to try a different target. This avoids the R3-style
+    batch-preview waste while still letting LLM recover from rejected proposals.
+    """
+    current = ctx._proposed_subject_this_round
+    if not current:
+        return None
+    if current == subject:
+        return None  # re-previewing same subject is allowed
+    return _err(
+        f"this round already has a pending proposal for {sorted(current)}. "
+        f"You MUST decide on that subject (action=split/refine/deprecate/merge) "
+        f"before previewing another. End this round with a decision first."
+    )
+
+
+def _lock_subject(ctx: BrainContext, subject: frozenset) -> None:
+    ctx._proposed_subject_this_round = subject
 
 
 # ── impl functions ────────────────────────────────────────────────────────────
@@ -130,86 +158,15 @@ def _impl_compare_tags(args: dict, ctx: BrainContext) -> dict:
         return _err(f"compare_tags({tag_a}, {tag_b}) failed: {e}")
 
 
-def _impl_quick_golden_sample(args: dict, ctx: BrainContext) -> dict:
-    n = int(args.get("n", 5))
-    filter_tag: str | None = args.get("filter_tag") or None
-
-    try:
-        pool = ctx.golden
-        if filter_tag:
-            pool = [
-                g for g in pool
-                if filter_tag in g.get("expected", {}).get("matter_tags", [])
-            ]
-        if not pool:
-            return _ok({
-                "sampled_count": 0,
-                "matter_exact_match_pct": None,
-                "lesson_match_pct": None,
-                "disagreements": [],
-            })
-
-        sample = random.sample(pool, min(n, len(pool)))
-
-        assignments_by_id = {
-            a["record_id"]: a
-            for a in ctx.assignments
-            if not a.get("missing")
-        }
-
-        matter_exact_matches = 0
-        lesson_matches = 0
-        disagreements: list[dict] = []
-
-        for g in sample:
-            rid = g["record_id"]
-            expected_matter = set(g.get("expected", {}).get("matter_tags", []))
-            expected_lesson = g.get("expected", {}).get("lesson_type", "")
-
-            a = assignments_by_id.get(rid)
-            if a is None:
-                disagreements.append({
-                    "record_id": rid,
-                    "issue": "not found in assignments",
-                    "expected_matter": sorted(expected_matter),
-                    "actual_matter": [],
-                })
-                continue
-
-            actual_matter = set(t["name"] for t in a.get("selected_tags", []))
-            actual_lesson = a.get("lesson_type", "")
-
-            if expected_matter == actual_matter:
-                matter_exact_matches += 1
-            else:
-                disagreements.append({
-                    "record_id": rid,
-                    "expected_matter": sorted(expected_matter),
-                    "actual_matter": sorted(actual_matter),
-                    "missing": sorted(expected_matter - actual_matter),
-                    "extra": sorted(actual_matter - expected_matter),
-                })
-
-            if expected_lesson and actual_lesson == expected_lesson:
-                lesson_matches += 1
-
-        total = len(sample)
-        return _ok({
-            "sampled_count": total,
-            "matter_exact_match_pct": round(matter_exact_matches / total * 100, 1) if total else None,
-            "lesson_match_pct": round(lesson_matches / total * 100, 1) if total else None,
-            "disagreements": disagreements,
-        })
-    except Exception as e:
-        return _err(f"quick_golden_sample failed: {e}")
-
-
 def _impl_propose_split_preview(args: dict, ctx: BrainContext) -> dict:
     from consolidate_agent.vocab_maintenance.propose.split import propose_split_fn
 
     tag_name = args.get("tag_name", "")
     if not tag_name:
         return _err("tag_name is required")
+    block = _check_subject(ctx, frozenset({tag_name}))
+    if block is not None:
+        return block
     try:
         proposals = propose_split_fn(
             ctx.vocab, ctx.assignments, tag_name, db_path=ctx.db_path
@@ -220,6 +177,7 @@ def _impl_propose_split_preview(args: dict, ctx: BrainContext) -> dict:
         proposal = proposals[0]
         proposal_id = str(uuid.uuid4())
         ctx.proposal_cache[proposal_id] = proposal
+        _lock_subject(ctx, frozenset({tag_name}))
 
         sub_tags_preview = [
             {
@@ -245,6 +203,9 @@ def _impl_propose_refine_preview(args: dict, ctx: BrainContext) -> dict:
     tag_name = args.get("tag_name", "")
     if not tag_name:
         return _err("tag_name is required")
+    block = _check_subject(ctx, frozenset({tag_name}))
+    if block is not None:
+        return block
     try:
         proposals = propose_refine_fn(
             ctx.vocab, ctx.assignments, focus=tag_name, db_path=ctx.db_path
@@ -255,6 +216,7 @@ def _impl_propose_refine_preview(args: dict, ctx: BrainContext) -> dict:
         proposal = proposals[0]
         proposal_id = str(uuid.uuid4())
         ctx.proposal_cache[proposal_id] = proposal
+        _lock_subject(ctx, frozenset({tag_name}))
 
         return _ok({
             "tag_name": tag_name,
@@ -265,6 +227,107 @@ def _impl_propose_refine_preview(args: dict, ctx: BrainContext) -> dict:
         })
     except Exception as e:
         return _err(f"propose_refine_preview({tag_name}) failed: {e}")
+
+
+def _impl_propose_deprecate_preview(args: dict, ctx: BrainContext) -> dict:
+    from consolidate_agent.vocab_maintenance.apply import DeprecateProposal, MergeProposal
+    from consolidate_agent.vocab_maintenance.propose.deprecate import propose_deprecate_fn
+
+    tag_name = args.get("tag_name", "")
+    if not tag_name:
+        return _err("tag_name is required")
+    block = _check_subject(ctx, frozenset({tag_name}))
+    if block is not None:
+        return block
+    try:
+        proposals = propose_deprecate_fn(
+            ctx.vocab, ctx.assignments, focus=tag_name, db_path=ctx.db_path
+        )
+        if not proposals:
+            return _ok({"tag_name": tag_name, "proposals": [], "message": "no deprecate proposed (judge said keep)"})
+
+        proposal = proposals[0]
+        proposal_id = str(uuid.uuid4())
+        ctx.proposal_cache[proposal_id] = proposal
+        _lock_subject(ctx, frozenset({tag_name}))
+
+        # Compute affected record summary: records currently under tag_name that would lose it
+        affected_records = [
+            a["record_id"] for a in ctx.assignments
+            if not a.get("missing") and any(t["name"] == tag_name for t in a.get("selected_tags", []))
+        ]
+        # Orphan count: records whose ONLY matter tag is the one being deprecated
+        orphan_count = 0
+        for a in ctx.assignments:
+            if a.get("missing"):
+                continue
+            tag_names = [t["name"] for t in a.get("selected_tags", [])]
+            if tag_names == [tag_name]:
+                orphan_count += 1
+
+        if isinstance(proposal, MergeProposal):
+            return _ok({
+                "tag_name": tag_name,
+                "proposal_id": proposal_id,
+                "proposal_type": "merge",
+                "keep_tag": proposal.keep_tag,
+                "discard_tag": proposal.discard_tag,
+                "affected_record_count": len(affected_records),
+                "note": "judge recommended merge_to instead of deprecate",
+            })
+        return _ok({
+            "tag_name": tag_name,
+            "proposal_id": proposal_id,
+            "proposal_type": "deprecate",
+            "affected_record_count": len(affected_records),
+            "orphan_count": orphan_count,
+            "note": f"{orphan_count} records would lose their only matter tag if deprecated",
+        })
+    except Exception as e:
+        return _err(f"propose_deprecate_preview({tag_name}) failed: {e}")
+
+
+def _impl_propose_merge_preview(args: dict, ctx: BrainContext) -> dict:
+    from consolidate_agent.vocab_maintenance.propose.merge import propose_merge_fn
+
+    tag_a = args.get("tag_a", "")
+    tag_b = args.get("tag_b", "")
+    if not tag_a or not tag_b:
+        return _err("tag_a and tag_b are required")
+    block = _check_subject(ctx, frozenset({tag_a, tag_b}))
+    if block is not None:
+        return block
+    try:
+        proposals = propose_merge_fn(
+            ctx.vocab, ctx.assignments, focus=f"{tag_a},{tag_b}", db_path=ctx.db_path
+        )
+        if not proposals:
+            return _ok({
+                "tag_a": tag_a, "tag_b": tag_b, "proposals": [],
+                "message": "no merge proposed (judge said keep separate)",
+            })
+
+        proposal = proposals[0]
+        proposal_id = str(uuid.uuid4())
+        ctx.proposal_cache[proposal_id] = proposal
+        _lock_subject(ctx, frozenset({tag_a, tag_b}))
+
+        keep = proposal.keep_tag
+        discard = proposal.discard_tag
+        affected = [
+            a["record_id"] for a in ctx.assignments
+            if not a.get("missing") and any(t["name"] == discard for t in a.get("selected_tags", []))
+        ]
+        return _ok({
+            "tag_a": tag_a,
+            "tag_b": tag_b,
+            "proposal_id": proposal_id,
+            "keep_tag": keep,
+            "discard_tag": discard,
+            "affected_record_count": len(affected),
+        })
+    except Exception as e:
+        return _err(f"propose_merge_preview({tag_a}, {tag_b}) failed: {e}")
 
 
 def _impl_apply_proposal(args: dict, ctx: BrainContext) -> dict:
@@ -380,26 +443,6 @@ TOOLS: list[ToolSpec] = [
         impl=_impl_compare_tags,
     ),
     ToolSpec(
-        name="quick_golden_sample",
-        description=(
-            "Sample N records from the 80 human-labeled golden set and check whether "
-            "LLM's current matter_tags match. Use to calibrate yourself against ground truth."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "n": {"type": "integer", "default": 5},
-                "filter_tag": {
-                    "type": "string",
-                    "description": "optional: only sample records that golden assigns to this tag",
-                },
-            },
-            "required": [],
-        },
-        output_keys=["sampled_count", "matter_exact_match_pct", "lesson_match_pct", "disagreements"],
-        impl=_impl_quick_golden_sample,
-    ),
-    ToolSpec(
         name="propose_split_preview",
         description=(
             "Generate a split proposal for a tag (uses propose_split_fn). "
@@ -430,6 +473,42 @@ TOOLS: list[ToolSpec] = [
         },
         output_keys=["tag_name", "proposal_id", "new_definition", "prune_count"],
         impl=_impl_propose_refine_preview,
+    ),
+    ToolSpec(
+        name="propose_deprecate_preview",
+        description=(
+            "Generate a deprecate proposal for a tag (LLM judges whether it should be "
+            "deprecated or merged into another). DOES NOT apply. Returns proposal_id + "
+            "affected_record_count + orphan_count (records that would lose their only matter tag). "
+            "If judge recommends merge instead, proposal_type='merge' with keep_tag/discard_tag."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "tag_name": {"type": "string"},
+            },
+            "required": ["tag_name"],
+        },
+        output_keys=["tag_name", "proposal_id", "proposal_type", "affected_record_count", "orphan_count", "note"],
+        impl=_impl_propose_deprecate_preview,
+    ),
+    ToolSpec(
+        name="propose_merge_preview",
+        description=(
+            "Generate a merge proposal for two tags (LLM judges if they should merge "
+            "and which to keep). DOES NOT apply. Returns proposal_id + keep_tag + discard_tag + "
+            "affected_record_count. Use when two tags have high overlap and similar semantics."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "tag_a": {"type": "string"},
+                "tag_b": {"type": "string"},
+            },
+            "required": ["tag_a", "tag_b"],
+        },
+        output_keys=["tag_a", "tag_b", "proposal_id", "keep_tag", "discard_tag", "affected_record_count"],
+        impl=_impl_propose_merge_preview,
     ),
     ToolSpec(
         name="apply_proposal",

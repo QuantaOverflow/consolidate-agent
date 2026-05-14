@@ -1,7 +1,6 @@
 from .memory import AgentMemory, ToolResult, RoundSummary, NetworkState
 from .decision import (
     AgentDecision,
-    ExpectedDelta,
     GateResult,
     GateDecision,
     gate_decision,
@@ -17,7 +16,6 @@ __all__ = [
     "RoundSummary",
     "NetworkState",
     "AgentDecision",
-    "ExpectedDelta",
     "GateResult",
     "GateDecision",
     "gate_decision",
