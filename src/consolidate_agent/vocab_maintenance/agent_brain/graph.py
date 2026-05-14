@@ -1408,9 +1408,28 @@ def route_after_specialist(state: BrainState) -> Literal["approve_path", "dig", 
     return "skip_ticket"  # reject (explicit reject from specialist)
 
 
+_FORCED_COMMIT_FOOTER = """
+BINARY COMMITMENT (you've exhausted dig budget — no more digs):
+- Output approve OR reject. dig_deeper is NOT allowed at this point.
+- It is OK to acknowledge uncertainty in `reasoning`. Binary verdict is
+  the system's requirement, not absolute certainty.
+- General fallback heuristic (when GOOD/BAD signals are mixed):
+  • No concrete deal-breaker uncovered (no orphan-creating prune, no
+    records flatly contradicting proposed definition) → lean approve.
+  • At least one concrete BAD-pattern signal found during your digs →
+    reject and cite the specific evidence.
+- cited_facts MUST reference concrete data from preview OR your dig results.
+
+Output ForcedCommitVerdict: verdict ∈ {{approve, reject}}, reasoning, cited_facts.
+"""
+
+
 def forced_commit_node(state: BrainState) -> dict:
     """Dig budget exhausted but specialist still wants more info. Force a final
-    approve/reject verdict — uncertainty is OK in reasoning, but no more digs.
+    approve/reject verdict using the SAME action-specific GOOD/BAD pattern the
+    specialist saw — only the dig walkthrough is replaced with a binary-commit
+    instruction. Otherwise the model would judge on a generic heuristic and
+    might miss action-specific signals.
     """
     log = get_default_logger()
     ticket = state.get("current_ticket") or {}
@@ -1422,7 +1441,6 @@ def forced_commit_node(state: BrainState) -> dict:
         target_display = target
 
     preview_block = _format_preview_block(state)
-    # Show working memory's dig results so the model has all gathered evidence
     working = state.get("working", [])
     dig_log_lines = []
     for tr in working:
@@ -1431,32 +1449,23 @@ def forced_commit_node(state: BrainState) -> dict:
             dig_log_lines.append(f"  {tr.tool}({tr.args}) → {str(res)[:600]}")
     dig_log = "\n".join(dig_log_lines) if dig_log_lines else "(none)"
 
-    forced_msg = f"""You are a specialist reviewer. You have exhausted your dig budget for this
-ticket. You MUST output a final verdict: approve OR reject. dig_deeper is NOT
-allowed.
+    # Get the action-specific prompt the specialist would have seen, render
+    # with the same preview, then append the forced-commit footer + dig log.
+    prompt_template = _PROMPT_BY_ACTION.get(action)
+    if prompt_template is None:
+        log.event("brain.forced_commit_unknown_action", action=action)
+        return {"llm_call_count": 0, "pending_verdict": None}
 
-TICKET:
-  action: {action}
-  target: {target_display}
-
-PREVIEW + DIFF:
-{preview_block}
-
-YOUR PRIOR DIG RESULTS:
-{dig_log}
-
-INSTRUCTIONS:
-- Decide approve or reject based on the evidence above.
-- It is OK to acknowledge uncertainty in `reasoning`. The system requires
-  a binary verdict, not absolute certainty.
-- General heuristic: if no clear deal-breaker (orphan_count>0, samples
-  contradicting the proposed definition, etc.) was uncovered, lean approve.
-  If you found at least one concrete problem the proposal does not address,
-  reject and cite it.
-- cited_facts MUST reference concrete data from preview OR your dig results.
-
-Output ForcedCommitVerdict: verdict (approve|reject), reasoning, cited_facts.
-"""
+    base = prompt_template.format(
+        action=action,
+        target=target_display,
+        preview_block=preview_block,
+    )
+    forced_msg = (
+        base
+        + "\n\nYOUR PRIOR DIG RESULTS:\n" + dig_log
+        + _FORCED_COMMIT_FOOTER
+    )
 
     settings = Settings()
     model = _chat_model(settings).with_structured_output(ForcedCommitVerdict)
